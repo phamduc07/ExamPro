@@ -13,12 +13,22 @@ export function validateExam(body, { isMetadataOnly = false } = {}) {
   }
   if (![0, 1, false, true].includes(body.isPublished)) return "Trạng thái xuất bản không hợp lệ.";
 
-  const maxTabSwitches = body.maxTabSwitches ?? 0;
-  if (!isNumber(maxTabSwitches) || !Number.isInteger(Number(maxTabSwitches)) || Number(maxTabSwitches) < 0) {
+  const maxTabSwitches = body.maxTabSwitches;
+  if (
+    maxTabSwitches !== null &&
+    maxTabSwitches !== undefined &&
+    maxTabSwitches !== "" &&
+    (!isNumber(maxTabSwitches) || !Number.isInteger(Number(maxTabSwitches)) || Number(maxTabSwitches) < 0)
+  ) {
     return "Giới hạn rời tab phải là số nguyên không âm.";
   }
-  const maxAttempts = body.maxAttempts ?? 0;
-  if (!isNumber(maxAttempts) || !Number.isInteger(Number(maxAttempts)) || Number(maxAttempts) < 0) {
+  const maxAttempts = body.maxAttempts;
+  if (
+    maxAttempts !== null &&
+    maxAttempts !== undefined &&
+    maxAttempts !== "" &&
+    (!isNumber(maxAttempts) || !Number.isInteger(Number(maxAttempts)) || Number(maxAttempts) < 0)
+  ) {
     return "Giới hạn lượt làm bài phải là số nguyên không âm.";
   }
 

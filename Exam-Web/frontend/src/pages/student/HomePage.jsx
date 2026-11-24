@@ -309,6 +309,26 @@ function StudentHomePage() {
                               <span>🎯 Điểm đạt:</span>
                               <strong>{exam.pass_score}/10</strong>
                             </div>
+                            <div className="spec-pill">
+                              <span>👁️ Rời tab:</span>
+                              <strong>
+                                {exam.max_tab_switches === null ||
+                                exam.max_tab_switches === undefined
+                                  ? "Không giới hạn"
+                                  : Number(exam.max_tab_switches) === 0
+                                  ? "0 lần (Nghiêm ngặt - Cấm rời tab)"
+                                  : `${exam.max_tab_switches} lần`}
+                              </strong>
+                            </div>
+                            <div className="spec-pill">
+                              <span>🔁 Lượt thi:</span>
+                              <strong>
+                                {exam.max_attempts === null ||
+                                exam.max_attempts === undefined
+                                  ? "Không giới hạn"
+                                  : `${exam.max_attempts} lượt`}
+                              </strong>
+                            </div>
                             {Boolean(exam.anti_cheat) && (
                               <span className="tab-switch-badge danger">
                                 🛡️ Giám sát Anti-Cheat

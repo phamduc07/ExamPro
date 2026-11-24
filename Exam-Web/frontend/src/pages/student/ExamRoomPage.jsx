@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
 import { useExamStore } from "../../store/useExamStore";
 import { useAuth } from "../../context/AuthContext";
+import { useDialog, ZaloAppealBox } from "../../context/DialogContext";
 
 function formatClock(seconds) {
   const safe = Math.max(0, seconds);
@@ -29,6 +30,7 @@ export default function ExamRoomPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { showToast } = useDialog();
 
   const {
     activeExam,
@@ -52,6 +54,7 @@ export default function ExamRoomPage() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [violationModal, setViolationModal] = useState(null);
   const [antiCheatWarning, setAntiCheatWarning] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(Boolean(document.fullscreenElement));
 
@@ -74,7 +77,10 @@ export default function ExamRoomPage() {
       })
       .catch((err) => {
         if (cancelled) return;
-        alert(err.response?.data?.message || err.message || "Không thể vào phòng thi.");
+        showToast(
+          err.response?.data?.message || err.message || "Không thể vào phòng thi.",
+          "error"
+        );
         navigate("/");
       })
       .finally(() => {
@@ -107,37 +113,49 @@ export default function ExamRoomPage() {
           tab_switch_count: currentState.tabSwitchCount || 0,
         });
         const submissionId = res.data.data.submissionId;
+        const finalTabCount = currentState.tabSwitchCount || 0;
+        if (isAuto && autoReason === "tabLimit") {
+          setViolationModal({
+            title: "🚫 Bài thi đã bị đình chỉ / thu bài do vi phạm quy chế",
+            reason: `Bạn đã rời tab / thoát toàn màn hình vượt quá giới hạn cho phép (${finalTabCount} lần). Hệ thống đã tự động thu bài của bạn.`,
+            nextPath: `/results/${submissionId}`,
+            actionLabel: "Xem kết quả bài thi",
+          });
+          return;
+        }
         resetExamSession();
         if (document.fullscreenElement && document.exitFullscreen) {
           document.exitFullscreen().catch(() => {});
         }
         if (isAuto) {
-          alert(
-            autoReason === "tabLimit"
-              ? "🚨 Bạn đã rời tab vượt quá giới hạn cho phép! Hệ thống tự động thu bài của bạn."
-              : "⏰ Đã hết thời gian làm bài! Hệ thống tự động thu bài của bạn."
+          showToast(
+            "⏰ Đã hết thời gian làm bài! Hệ thống đã tự động thu bài của bạn.",
+            "warning"
           );
         }
         navigate(`/results/${submissionId}`, { replace: true });
       } catch (err) {
         if (err.response?.data?.isSuspended) {
-          resetExamSession();
-          if (document.fullscreenElement && document.exitFullscreen) {
-            document.exitFullscreen().catch(() => {});
-          }
-          alert(
-            err.response.data.message ||
-              "🛑 Bài thi của bạn đã bị Giám thị đình chỉ (0 điểm)."
-          );
-          navigate("/my-results", { replace: true });
+          setViolationModal({
+            title: "🚫 Bài thi đã bị đình chỉ / thu bài do vi phạm quy chế",
+            reason:
+              err.response.data.suspendReason ||
+              err.response.data.message ||
+              "Bài thi của bạn đã bị Giám thị đình chỉ (0 điểm).",
+            nextPath: "/my-results",
+            actionLabel: "Về trang Lịch sử làm bài",
+          });
           return;
         }
         submitLockRef.current = false;
         setSubmitting(false);
-        alert(err.response?.data?.message || "Lỗi khi nộp bài. Vui lòng thử lại.");
+        showToast(
+          err.response?.data?.message || "Lỗi khi nộp bài. Vui lòng thử lại.",
+          "error"
+        );
       }
     },
-    [id, navigate, resetExamSession]
+    [id, navigate, resetExamSession, showToast]
   );
 
   useEffect(() => {
@@ -165,9 +183,12 @@ export default function ExamRoomPage() {
       lastTabSwitchRef.current = now;
       incrementTabSwitch();
 
-      const maxAllowed = Number(activeExam.max_tab_switches) || 0;
+      const hasTabLimit =
+        activeExam.max_tab_switches !== null &&
+        activeExam.max_tab_switches !== undefined;
+      const maxAllowed = hasTabLimit ? Number(activeExam.max_tab_switches) : null;
       const nextCount = useExamStore.getState().tabSwitchCount;
-      if (maxAllowed > 0 && nextCount > maxAllowed) {
+      if (hasTabLimit && nextCount > maxAllowed) {
         if (Boolean(activeExam.anti_cheat)) {
           if (!autoSubmitTimerRef.current) {
             setAntiCheatWarning(
@@ -217,6 +238,12 @@ export default function ExamRoomPage() {
   useEffect(() => {
     if (loading || !activeExam || !Boolean(activeExam.anti_cheat)) return;
 
+    setIsFullscreen(Boolean(document.fullscreenElement));
+    ignoreBlurUntilRef.current = Math.max(
+      ignoreBlurUntilRef.current,
+      Date.now() + 1500
+    );
+
     const triggerViolation = (reasonText) => {
       if (submitLockRef.current) return;
       const now = Date.now();
@@ -225,9 +252,12 @@ export default function ExamRoomPage() {
       incrementTabSwitch();
       setAntiCheatWarning(`🚨 Cảnh báo Anti-Cheat: ${reasonText}`);
 
-      const maxAllowed = Number(activeExam.max_tab_switches) || 0;
+      const hasTabLimit =
+        activeExam.max_tab_switches !== null &&
+        activeExam.max_tab_switches !== undefined;
+      const maxAllowed = hasTabLimit ? Number(activeExam.max_tab_switches) : null;
       const nextCount = useExamStore.getState().tabSwitchCount;
-      if (maxAllowed > 0 && nextCount > maxAllowed && !autoSubmitTimerRef.current) {
+      if (hasTabLimit && nextCount > maxAllowed && !autoSubmitTimerRef.current) {
         setAntiCheatWarning(
           `🚨 Bạn đã vi phạm quá giới hạn (${nextCount}/${maxAllowed}). Hệ thống sẽ tự động nộp bài sau 3 giây!`
         );
@@ -293,9 +323,6 @@ export default function ExamRoomPage() {
       document.removeEventListener("selectstart", blockEvent);
       window.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
-      if (document.fullscreenElement && document.exitFullscreen) {
-        document.exitFullscreen().catch(() => {});
-      }
     };
   }, [loading, activeExam, incrementTabSwitch, handleFinalSubmit]);
 
@@ -314,7 +341,10 @@ export default function ExamRoomPage() {
   const progressPercent = totalQ > 0 ? Math.round((answeredCount / totalQ) * 100) : 0;
   const isFlagged = flaggedQuestions.includes(currentQuestion.id);
   const isTimeUrgent = remainingSeconds <= 180;
-  const maxTabSwitches = Number(activeExam.max_tab_switches) || 0;
+  const hasTabLimit =
+    activeExam.max_tab_switches !== null &&
+    activeExam.max_tab_switches !== undefined;
+  const maxTabSwitches = hasTabLimit ? Number(activeExam.max_tab_switches) : null;
 
   const baseOptions = [
     { key: "A", text: currentQuestion.option_a },
@@ -381,7 +411,7 @@ export default function ExamRoomPage() {
             className={`tab-switch-badge ${
               tabSwitchCount === 0
                 ? "safe"
-                : maxTabSwitches > 0 && tabSwitchCount >= maxTabSwitches
+                : hasTabLimit && tabSwitchCount >= maxTabSwitches
                 ? "danger"
                 : tabSwitchCount <= 2
                 ? "warn"
@@ -390,7 +420,7 @@ export default function ExamRoomPage() {
             title="Số lần bạn rời khỏi tab hoặc cửa sổ phòng thi"
           >
             👁️ Rời tab: <strong>{tabSwitchCount}</strong>
-            {maxTabSwitches > 0 ? `/${maxTabSwitches}` : " lần"}
+            {hasTabLimit ? `/${maxTabSwitches}` : " lần"}
           </div>
 
           <div className={`countdown-badge ${isTimeUrgent ? "urgent" : ""}`}>
@@ -573,6 +603,44 @@ export default function ExamRoomPage() {
                 onClick={() => handleFinalSubmit(false)}
               >
                 {submitting ? "Đang chấm điểm..." : "Đồng ý nộp bài"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {violationModal && (
+        <div className="custom-modal-backdrop">
+          <div
+            className="custom-modal-card danger-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={violationModal.title}
+          >
+            <div className="custom-modal-header">
+              <h3>{violationModal.title}</h3>
+            </div>
+
+            <div className="violation-reason-box">
+              <strong>Lý do ghi nhận:</strong> {violationModal.reason}
+            </div>
+
+            <ZaloAppealBox />
+
+            <div className="custom-modal-footer">
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  const target = violationModal.nextPath || "/my-results";
+                  setViolationModal(null);
+                  resetExamSession();
+                  if (document.fullscreenElement && document.exitFullscreen) {
+                    document.exitFullscreen().catch(() => {});
+                  }
+                  navigate(target, { replace: true });
+                }}
+              >
+                {violationModal.actionLabel || "Tiếp tục"}
               </button>
             </div>
           </div>

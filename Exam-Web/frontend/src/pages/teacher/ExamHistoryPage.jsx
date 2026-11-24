@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
+import { useDialog } from "../../context/DialogContext";
 import { MAJOR_GROUP_LABELS } from "../../utils/ptitHelper";
 
 function formatDateTime(raw) {
@@ -36,6 +37,7 @@ const ACTION_BADGE_MAP = {
 
 export default function ExamHistoryPage() {
   const navigate = useNavigate();
+  const { confirmDialog } = useDialog();
   const [activeTab, setActiveTab] = useState("EXAMS");
   const [exams, setExams] = useState([]);
   const [logs, setLogs] = useState([]);
@@ -123,7 +125,12 @@ export default function ExamHistoryPage() {
   };
 
   const handleReopenExam = async (exam) => {
-    if (!window.confirm(`Mở lại đề thi "${exam.title}" ngay lập tức?`)) return;
+    const ok = await confirmDialog({
+      title: "Mở lại đề thi",
+      message: `Mở lại đề thi "${exam.title}" ngay lập tức?`,
+      confirmText: "Mở lại đề",
+    });
+    if (!ok) return;
     setNotice({ type: "", text: "" });
     try {
       const res = await axiosClient.patch(`/exams/${exam.id}/reopen`);
@@ -141,7 +148,13 @@ export default function ExamHistoryPage() {
   };
 
   const handleDeleteExam = async (exam) => {
-    if (!window.confirm(`Bạn chắc chắn muốn xóa đề thi "${exam.title}"?`)) return;
+    const ok = await confirmDialog({
+      title: "Xóa đề thi",
+      message: `Bạn chắc chắn muốn xóa đề thi "${exam.title}"?`,
+      confirmText: "Xóa đề thi",
+      tone: "danger",
+    });
+    if (!ok) return;
     setNotice({ type: "", text: "" });
     try {
       await axiosClient.delete(`/exams/${exam.id}`);

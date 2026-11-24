@@ -53,7 +53,7 @@ export async function submitExam(req, res, next) {
       if (exams[0].close_at && now.getTime() > new Date(exams[0].close_at).getTime() + 60000) {
         return res.status(403).json({ success: false, message: "Đề thi đã hết thời gian đóng." });
       }
-      if (Number(exams[0].max_attempts) > 0) {
+      if (exams[0].max_attempts !== null && exams[0].max_attempts !== undefined) {
         const [attemptRows] = await pool.query(
           "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ? AND student_id = ?",
           [Number(examId), req.user.id]
@@ -142,7 +142,7 @@ export async function submitExam(req, res, next) {
       });
     }
 
-    if (req.user.role === "STUDENT" && Number(exams[0].max_attempts) > 0) {
+    if (req.user.role === "STUDENT" && exams[0].max_attempts !== null && exams[0].max_attempts !== undefined) {
       const [attemptCountRows] = await connection.query(
         "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ? AND student_id = ?",
         [Number(examId), req.user.id]
@@ -564,7 +564,7 @@ export async function unsuspendSubmission(req, res, next) {
     );
 
     await connection.query(
-      "DELETE FROM submissions WHERE exam_id = ? AND student_id = ? AND is_suspended = 1",
+      "DELETE FROM submissions WHERE exam_id = ? AND student_id = ?",
       [Number(examId), Number(userId)]
     );
     await connection.query(
@@ -581,7 +581,7 @@ export async function unsuspendSubmission(req, res, next) {
           req.user?.fullName || "Quản trị viên",
           examRows[0].title,
           examRows[0].subject_code || null,
-          `Mở lại lượt thi cho SV ${userRows[0].full_name} (${userRows[0].student_code || userRows[0].id})`,
+          `Gỡ vi phạm & mở lại lượt thi cho SV ${userRows[0].full_name} (${userRows[0].student_code || userRows[0].id})`,
         ]
       );
     }

@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Link } from "react-router-dom";
 import axiosClient from "../api/axiosClient";
+import { useDialog } from "../context/DialogContext";
 import { MAJOR_GROUP_LABELS } from "../utils/ptitHelper";
+
+const QUICK_SUSPEND_REASONS = [
+  "Vi phạm quy chế phòng thi",
+  "Rời tab / Thoát toàn màn hình quá giới hạn",
+  "Sử dụng tài liệu / DevTools",
+];
 
 function formatDuration(sec) {
   const safe = Math.max(0, Number(sec) || 0);
@@ -29,11 +35,17 @@ function formatRankDisplay(rank) {
 }
 
 export default function AdminExamMonitor() {
+  const { showToast, confirmDialog } = useDialog();
   const [overview, setOverview] = useState({
     alwaysOpen: [],
     inProgressWindow: [],
     closed: [],
   });
+  const [suspendTarget, setSuspendTarget] = useState(null);
+  const [suspendReason, setSuspendReason] = useState("Vi phạm quy chế phòng thi");
+  const [suspendSubmitting, setSuspendSubmitting] = useState(false);
+  const [reopenTarget, setReopenTarget] = useState(null);
+  const [reopenSubmitting, setReopenSubmitting] = useState(false);
   const [activeTab, setActiveTab] = useState("ALWAYS_OPEN");
   const [selectedSubjectCode, setSelectedSubjectCode] = useState("");
   const [collapsedSubjects, setCollapsedSubjects] = useState({});
@@ -145,57 +157,105 @@ export default function AdminExamMonitor() {
 
   const handleReopenExam = async (e, exam) => {
     e.stopPropagation();
-    if (!window.confirm(`Mở lại đề thi "${exam.title}" ngay lập tức?`)) return;
+    const ok = await confirmDialog({
+      title: "Mở lại đề thi",
+      message: `Mở lại đề thi "${exam.title}" ngay lập tức?`,
+      confirmText: "Mở lại đề",
+    });
+    if (!ok) return;
     try {
       await axiosClient.patch(`/exams/${exam.id}/reopen`);
+      showToast(`Đã mở lại đề thi "${exam.title}".`, "success");
       loadOverview();
     } catch (err) {
-      alert(err.response?.data?.message || "Không thể mở lại đề thi.");
+      showToast(err.response?.data?.message || "Không thể mở lại đề thi.", "error");
     }
   };
 
-  const handleSuspendStudent = async (examId, userId, fullName) => {
-    const reason = window.prompt(
-      `Nhập lý do đình chỉ bài thi (0 điểm) của sinh viên "${fullName}":`,
-      "Vi phạm quy chế phòng thi"
-    );
-    if (reason === null) return;
+  const openSuspendModal = (examId, userId, fullName, studentCode = "") => {
+    setSuspendTarget({ examId, userId, fullName, studentCode });
+    setSuspendReason("Vi phạm quy chế phòng thi");
+  };
+
+  const handleConfirmSuspend = async (e) => {
+    e.preventDefault();
+    if (!suspendTarget || suspendSubmitting) return;
+    setSuspendSubmitting(true);
     try {
       await axiosClient.post("/submissions/suspend", {
-        examId,
-        userId,
-        reason: reason.trim() || "Vi phạm quy chế phòng thi",
+        examId: suspendTarget.examId,
+        userId: suspendTarget.userId,
+        reason: suspendReason.trim() || "Vi phạm quy chế phòng thi",
       });
-      await Promise.all([openLeaderboardModal(examId), loadOverview()]);
+      const targetExamId = suspendTarget.examId;
+      const targetName = suspendTarget.fullName;
+      setSuspendTarget(null);
+      showToast(`Đã đình chỉ bài thi (0đ) của sinh viên "${targetName}".`, "warning");
+      await Promise.all([openLeaderboardModal(targetExamId), loadOverview()]);
     } catch (err) {
-      alert(err.response?.data?.message || "Không thể đình chỉ bài thi.");
+      showToast(err.response?.data?.message || "Không thể đình chỉ bài thi.", "error");
+    } finally {
+      setSuspendSubmitting(false);
     }
   };
 
-  const handleUnsuspendStudent = async (examId, userId, fullName) => {
-    if (
-      !window.confirm(
-        `Mở khóa cho sinh viên "${fullName}" làm lại bài thi này từ đầu?`
-      )
-    ) {
-      return;
-    }
+  const openReopenModal = (examId, userId, fullName, studentCode = "", examTitle = "") => {
+    setReopenTarget({ examId, userId, fullName, studentCode, examTitle });
+  };
+
+  const handleConfirmReopen = async () => {
+    if (!reopenTarget || reopenSubmitting) return;
+    setReopenSubmitting(true);
     try {
-      await axiosClient.post("/submissions/unsuspend", { examId, userId });
-      await Promise.all([openLeaderboardModal(examId), loadOverview()]);
+      await axiosClient.post("/submissions/unsuspend", {
+        examId: reopenTarget.examId,
+        userId: reopenTarget.userId,
+      });
+      const targetExamId = reopenTarget.examId;
+      const targetName = reopenTarget.fullName;
+      setReopenTarget(null);
+      showToast(`Đã gỡ vi phạm và mở lại lượt thi cho sinh viên "${targetName}".`, "success");
+      await Promise.all([openLeaderboardModal(targetExamId), loadOverview()]);
     } catch (err) {
-      alert(err.response?.data?.message || "Không thể mở lại lượt thi.");
+      showToast(err.response?.data?.message || "Không thể mở lại lượt thi.", "error");
+    } finally {
+      setReopenSubmitting(false);
     }
   };
+
+  const onlineExams = useMemo(() => {
+    const map = new Map();
+    for (const exam of [...overview.alwaysOpen, ...overview.inProgressWindow]) {
+      map.set(exam.id, exam);
+    }
+    return Array.from(map.values());
+  }, [overview]);
+
+  const sessionExams = useMemo(() => {
+    const map = new Map();
+    for (const exam of [
+      ...overview.alwaysOpen,
+      ...overview.inProgressWindow,
+      ...overview.closed,
+    ]) {
+      const hasSession =
+        Boolean(String(exam.exam_session || "").trim()) ||
+        Boolean(String(exam.exam_shift || "").trim());
+      if (hasSession) {
+        map.set(exam.id, exam);
+      }
+    }
+    return Array.from(map.values());
+  }, [overview]);
 
   const currentList = useMemo(
     () =>
       activeTab === "ALWAYS_OPEN"
-        ? overview.alwaysOpen
+        ? onlineExams
         : activeTab === "IN_PROGRESS"
-        ? overview.inProgressWindow
+        ? sessionExams
         : overview.closed,
-    [activeTab, overview]
+    [activeTab, onlineExams, sessionExams, overview.closed]
   );
 
   const subjectPills = useMemo(() => {
@@ -267,28 +327,6 @@ export default function AdminExamMonitor() {
         </div>
       )}
 
-      <section className="hero-banner">
-        <div className="hero-banner-text">
-          <span className="banner-pill">
-            🛡️ TRUNG TÂM GIÁM SÁT ĐỀ THI & BẢNG XẾP HẠNG • ADMIN
-          </span>
-          <h1>Giám sát Đề thi Trực tuyến</h1>
-          <p>
-            Theo dõi trạng thái làm bài theo thời gian thực, xem thống kê phổ điểm
-            và bảng xếp hạng chi tiết của sinh viên cho từng đề thi.
-          </p>
-        </div>
-
-        <div className="hero-banner-actions">
-          <Link to="/teacher/questions" className="btn-glass">
-            🗂️ Ngân hàng câu hỏi
-          </Link>
-          <Link to="/teacher/exams" className="btn-white">
-            ➕ Tạo & Quản lý Đề thi
-          </Link>
-        </div>
-      </section>
-
       <section className="stats-row">
         <div className="stat-box">
           <div className="stat-icon indigo">📚</div>
@@ -300,17 +338,15 @@ export default function AdminExamMonitor() {
         <div className="stat-box">
           <div className="stat-icon emerald">🟢</div>
           <div>
-            <span className="stat-label">Đề trực tuyến (Mở mọi lúc)</span>
-            <strong className="stat-value">{overview.alwaysOpen.length} đề</strong>
+            <span className="stat-label">Đề trực tuyến (Đang mở)</span>
+            <strong className="stat-value">{onlineExams.length} đề</strong>
           </div>
         </div>
         <div className="stat-box">
-          <div className="stat-icon amber">🟠</div>
+          <div className="stat-icon amber">📅</div>
           <div>
-            <span className="stat-label">Đề đang trong thời gian làm</span>
-            <strong className="stat-value">
-              {overview.inProgressWindow.length} đề
-            </strong>
+            <span className="stat-label">Các đợt thi</span>
+            <strong className="stat-value">{sessionExams.length} đề</strong>
           </div>
         </div>
         <div className="stat-box">
@@ -330,14 +366,14 @@ export default function AdminExamMonitor() {
               className={`tab-btn ${activeTab === "ALWAYS_OPEN" ? "active" : ""}`}
               onClick={() => handleSwitchStatusTab("ALWAYS_OPEN")}
             >
-              🟢 Đề trực tuyến ({overview.alwaysOpen.length})
+              🟢 Đề trực tuyến ({onlineExams.length})
             </button>
             <button
               type="button"
               className={`tab-btn ${activeTab === "IN_PROGRESS" ? "active" : ""}`}
               onClick={() => handleSwitchStatusTab("IN_PROGRESS")}
             >
-              🟠 Đang trong thời gian làm ({overview.inProgressWindow.length})
+              📅 Các đợt thi ({sessionExams.length})
             </button>
             <button
               type="button"
@@ -743,35 +779,39 @@ export default function AdminExamMonitor() {
                                         </span>
                                       </td>
                                       <td style={{ textAlign: "right" }}>
-                                        {isSuspended ? (
+                                        <div style={{ display: "inline-flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" }}>
                                           <button
                                             type="button"
                                             className="btn-sm picker-bank-btn"
                                             onClick={() =>
-                                              handleUnsuspendStudent(
+                                              openReopenModal(
                                                 selectedExamId,
                                                 row.student_id,
-                                                row.full_name
+                                                row.full_name,
+                                                row.student_code,
+                                                leaderboardData?.exam?.title || ""
                                               )
                                             }
                                           >
-                                            🔄 Mở khóa cho thi lại
+                                            🔓 Gỡ vi phạm / Mở lại lượt
                                           </button>
-                                        ) : (
-                                          <button
-                                            type="button"
-                                            className="btn-sm delete"
-                                            onClick={() =>
-                                              handleSuspendStudent(
-                                                selectedExamId,
-                                                row.student_id,
-                                                row.full_name
-                                              )
-                                            }
-                                          >
-                                            🛑 Đình chỉ (0đ)
-                                          </button>
-                                        )}
+                                          {!isSuspended && (
+                                            <button
+                                              type="button"
+                                              className="btn-sm delete"
+                                              onClick={() =>
+                                                openSuspendModal(
+                                                  selectedExamId,
+                                                  row.student_id,
+                                                  row.full_name,
+                                                  row.student_code
+                                                )
+                                              }
+                                            >
+                                              🚫 Đình chỉ (0đ)
+                                            </button>
+                                          )}
+                                        </div>
                                       </td>
                                     </tr>
                                   );
@@ -834,10 +874,11 @@ export default function AdminExamMonitor() {
                                       type="button"
                                       className="btn-sm delete"
                                       onClick={() =>
-                                        handleSuspendStudent(
+                                        openSuspendModal(
                                           selectedExamId,
                                           item.user_id,
-                                          item.full_name
+                                          item.full_name,
+                                          item.student_code
                                         )
                                       }
                                     >
@@ -854,6 +895,160 @@ export default function AdminExamMonitor() {
                   </>
                 )
               )}
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {suspendTarget &&
+        createPortal(
+          <div
+            className="custom-modal-backdrop"
+            onClick={() => !suspendSubmitting && setSuspendTarget(null)}
+          >
+            <form
+              className="custom-modal-card danger-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Xác nhận Đình chỉ bài thi"
+              onClick={(e) => e.stopPropagation()}
+              onSubmit={handleConfirmSuspend}
+            >
+              <div className="custom-modal-header">
+                <h3>🚫 Xác nhận Đình chỉ bài thi (0 điểm)</h3>
+                <button
+                  type="button"
+                  className="custom-modal-close"
+                  disabled={suspendSubmitting}
+                  onClick={() => setSuspendTarget(null)}
+                  aria-label="Đóng"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="suspend-student-info">
+                <div>
+                  <strong>{suspendTarget.fullName}</strong>
+                  {suspendTarget.studentCode ? ` • Mã SV: ${suspendTarget.studentCode}` : ""}
+                </div>
+                <span>0.00 điểm</span>
+              </div>
+
+              <div className="form-field">
+                <label>Chọn nhanh lý do phổ biến</label>
+                <div className="quick-reason-chips">
+                  {QUICK_SUSPEND_REASONS.map((reason) => (
+                    <button
+                      key={reason}
+                      type="button"
+                      className={`quick-reason-chip ${
+                        suspendReason === reason ? "active" : ""
+                      }`}
+                      onClick={() => setSuspendReason(reason)}
+                    >
+                      {reason}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="form-field">
+                <label>Lý do chi tiết *</label>
+                <textarea
+                  rows={3}
+                  value={suspendReason}
+                  onChange={(e) => setSuspendReason(e.target.value)}
+                  placeholder="Nhập lý do đình chỉ bài thi..."
+                  required
+                />
+              </div>
+
+              <div className="custom-modal-footer">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={suspendSubmitting}
+                  onClick={() => setSuspendTarget(null)}
+                >
+                  Hủy bỏ
+                </button>
+                <button
+                  type="submit"
+                  className="btn-danger-solid"
+                  disabled={suspendSubmitting}
+                >
+                  {suspendSubmitting ? "Đang xử lý..." : "🚫 Xác nhận đình chỉ (0đ)"}
+                </button>
+              </div>
+            </form>
+          </div>,
+          document.body
+        )}
+
+      {reopenTarget &&
+        createPortal(
+          <div
+            className="custom-modal-backdrop"
+            onClick={() => !reopenSubmitting && setReopenTarget(null)}
+          >
+            <div
+              className="custom-modal-card"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Xác nhận Gỡ vi phạm và Mở lại lượt thi"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="custom-modal-header">
+                <h3>🔓 Xác nhận Gỡ vi phạm & Mở lại lượt thi</h3>
+                <button
+                  type="button"
+                  className="custom-modal-close"
+                  disabled={reopenSubmitting}
+                  onClick={() => setReopenTarget(null)}
+                  aria-label="Đóng"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div
+                className="zalo-appeal-box"
+                style={{ gap: "6px", padding: "12px 14px" }}
+              >
+                <div style={{ color: "#ffffff", fontWeight: 700, fontSize: "0.9rem" }}>
+                  👤 {reopenTarget.fullName}
+                  {reopenTarget.studentCode ? ` • Mã SV: ${reopenTarget.studentCode}` : ""}
+                </div>
+                {reopenTarget.examTitle && (
+                  <div style={{ color: "#7dd3fc", fontSize: "0.84rem", fontWeight: 600 }}>
+                    📝 Đề thi: {reopenTarget.examTitle}
+                  </div>
+                )}
+              </div>
+
+              <p className="custom-modal-body">
+                Thao tác này sẽ xóa trạng thái vi phạm/đình chỉ hiện tại và cấp lại 1 lượt làm bài mới cho sinh viên.
+              </p>
+
+              <div className="custom-modal-footer">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={reopenSubmitting}
+                  onClick={() => setReopenTarget(null)}
+                >
+                  Hủy bỏ
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={reopenSubmitting}
+                  onClick={handleConfirmReopen}
+                >
+                  {reopenSubmitting ? "Đang xử lý..." : "🔓 Xác nhận mở lại lượt"}
+                </button>
+              </div>
             </div>
           </div>,
           document.body

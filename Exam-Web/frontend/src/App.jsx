@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { BrowserRouter } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
+import { DialogProvider } from "./context/DialogContext";
 import AppRouter from "./router/AppRouter";
 
 export default function App() {
@@ -38,9 +39,10 @@ export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-
-        <div className="cursor-spotlight" aria-hidden="true" />
-        <AppRouter />
+        <DialogProvider>
+          <div className="cursor-spotlight" aria-hidden="true" />
+          <AppRouter />
+        </DialogProvider>
       </AuthProvider>
     </BrowserRouter>
   );

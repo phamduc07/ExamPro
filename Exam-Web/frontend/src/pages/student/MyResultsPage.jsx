@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
+import { ZaloAppealBox } from "../../context/DialogContext";
 
 function formatDuration(sec) {
   const safe = Math.max(0, Number(sec) || 0);
@@ -250,7 +251,10 @@ export default function MyResultsPage() {
                         <tbody>
                           {group.items.map((item) => {
                             const score = Number(item.score);
-                            const passed = score >= Number(item.pass_score ?? 5);
+                            const isSuspended =
+                              Number(item.is_suspended) === 1 ||
+                              Boolean(item.suspend_reason);
+                            const passed = !isSuspended && score >= Number(item.pass_score ?? 5);
                             const tabCount = Number(item.tab_switch_count) || 0;
                             const tabClass =
                               tabCount === 0
@@ -265,6 +269,18 @@ export default function MyResultsPage() {
                               <tr key={item.id}>
                                 <td>
                                   <strong>{item.exam_title}</strong>
+                                  {isSuspended && (
+                                    <div style={{ marginTop: "6px" }}>
+                                      <div
+                                        className="violation-reason-box"
+                                        style={{ padding: "8px 10px", fontSize: "0.8rem" }}
+                                      >
+                                        <strong>🚫 Bị đình chỉ:</strong>{" "}
+                                        {item.suspend_reason || "Vi phạm quy chế phòng thi"}
+                                      </div>
+                                      <ZaloAppealBox compact />
+                                    </div>
+                                  )}
                                 </td>
                                 <td>
                                   <strong>
@@ -302,9 +318,15 @@ export default function MyResultsPage() {
                                 </td>
                                 <td>
                                   <span
-                                    className={`status-tag ${passed ? "pass" : "fail"}`}
+                                    className={`status-tag ${
+                                      isSuspended ? "fail" : passed ? "pass" : "fail"
+                                    }`}
                                   >
-                                    {passed ? "ĐẠT" : "CHƯA ĐẠT"}
+                                    {isSuspended
+                                      ? "🚫 BỊ ĐÌNH CHỈ"
+                                      : passed
+                                      ? "ĐẠT"
+                                      : "CHƯA ĐẠT"}
                                   </span>
                                 </td>
                                 <td style={{ textAlign: "right" }}>

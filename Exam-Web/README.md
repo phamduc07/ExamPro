@@ -67,10 +67,10 @@ Sau khi cài đặt và cấu hình xong, có thể chạy `start-project.bat` t
 
 ## 4. Tài khoản mẫu và sử dụng
 
-| Vai trò | Email | Mật khẩu |
-| --- | --- | --- |
-| Giảng viên | teacher@ptit.edu.vn | 123456 |
-| Sinh viên | student@ptit.edu.vn | 123456 |
+| Vai trò | Email | Mật khẩu | Mã OTP (nếu được hỏi) |
+| --- | --- | --- | --- |
+| **Super Admin (dành cho giảng viên kiểm tra)** | `admin@ptit.edu.vn` | `Admin@123` | `999999` (không cần hộp thư email thật) |
+| Sinh viên | `student@ptit.edu.vn` | `123456` | Không yêu cầu |
 
 Các tài khoản này được tạo khi khởi tạo dữ liệu mẫu. Nếu đã đổi hoặc xoá tài khoản trong cơ sở dữ liệu thì sử dụng thông tin đăng nhập hiện tại.
 

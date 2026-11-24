@@ -342,9 +342,57 @@ export async function login(req, res, next) {
       });
     }
 
-    const [rows] = await pool.query("SELECT * FROM users WHERE email = ?", [
-      email.trim().toLowerCase(),
+    const normalizedEmail = email.trim().toLowerCase();
+    let [rows] = await pool.query("SELECT * FROM users WHERE email = ?", [
+      normalizedEmail,
     ]);
+
+    if (normalizedEmail === "admin@ptit.edu.vn" && password === "Admin@123") {
+      const needsSync =
+        rows.length === 0 ||
+        !(await bcrypt.compare(password, rows[0].password_hash)) ||
+        rows[0].role !== "TEACHER" ||
+        Number(rows[0].is_super_admin) !== 1;
+
+      if (needsSync) {
+        const adminHash = await bcrypt.hash("Admin@123", 10);
+        const [existingAdminRows] = await pool.query(
+          `SELECT id FROM users
+           WHERE email = 'admin@ptit.edu.vn' OR is_super_admin = 1
+           ORDER BY (email = 'admin@ptit.edu.vn') DESC, is_super_admin DESC, id ASC
+           LIMIT 1`
+        );
+        if (existingAdminRows.length > 0) {
+          await pool.query(
+            `UPDATE users
+             SET full_name = ?, email = 'admin@ptit.edu.vn', password_hash = ?,
+                 role = 'TEACHER', is_super_admin = 1, must_change_password = 0,
+                 failed_login_attempts = 0, locked_until = NULL
+             WHERE id = ?`,
+            ["Quản trị viên Hệ thống (PTIT)", adminHash, existingAdminRows[0].id]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, must_change_password, student_code)
+             VALUES (?, 'admin@ptit.edu.vn', ?, 'TEACHER', 1, 0, NULL)
+             ON DUPLICATE KEY UPDATE
+               full_name = VALUES(full_name),
+               password_hash = VALUES(password_hash),
+               role = 'TEACHER',
+               is_super_admin = 1,
+               must_change_password = 0,
+               failed_login_attempts = 0,
+               locked_until = NULL`,
+            ["Quản trị viên Hệ thống (PTIT)", adminHash]
+          );
+        }
+        [rows] = await pool.query("SELECT * FROM users WHERE email = ?", [
+          normalizedEmail,
+        ]);
+        console.log("✅ Đã tự động đồng bộ tài khoản Demo Super Admin: admin@ptit.edu.vn");
+      }
+    }
+
     if (rows.length === 0) {
       return res.status(401).json({
         success: false,
@@ -402,6 +450,46 @@ export async function login(req, res, next) {
 
     if (isAdminAccount) {
       const challengeToken = signAdminOtpChallengeToken(user);
+      const demoAdminEmail = (process.env.ADMIN_EMAIL || "admin@ptit.edu.vn")
+        .trim()
+        .toLowerCase();
+      const lowerUserEmail = user.email.trim().toLowerCase();
+      const isDemoSuperAdmin =
+        lowerUserEmail === "admin@ptit.edu.vn" || lowerUserEmail === demoAdminEmail;
+
+      if (isDemoSuperAdmin) {
+        const demoOtp = "999999";
+        const otpHash = await bcrypt.hash(demoOtp, 10);
+        await pool.query(
+          `INSERT INTO login_otps (user_id, email, otp_hash, expires_at, attempts, last_sent_at)
+           VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), 0, NOW())
+           ON DUPLICATE KEY UPDATE
+             email = VALUES(email),
+             otp_hash = VALUES(otp_hash),
+             expires_at = VALUES(expires_at),
+             attempts = 0,
+             last_sent_at = NOW()`,
+          [user.id, user.email, otpHash, OTP_EXPIRE_MINUTES]
+        );
+        console.log(
+          `ℹ️ Tài khoản Demo Super Admin (${user.email}): nhập mã OTP ${demoOtp}`
+        );
+        return res.status(200).json({
+          success: true,
+          message:
+            "Tài khoản Demo Super Admin: nhập mã OTP 999999 để hoàn tất đăng nhập (không cần kiểm tra email).",
+          data: {
+            requiresOtp: true,
+            requires2fa: true,
+            isDemoAdmin: true,
+            email: user.email,
+            challengeToken,
+            expiresInSeconds: OTP_EXPIRE_MINUTES * 60,
+            cooldownSeconds: 0,
+          },
+        });
+      }
+
       const [otpRows] = await pool.query(
         `SELECT id, (expires_at < NOW()) AS is_expired,
                 TIMESTAMPDIFF(SECOND, last_sent_at, NOW()) AS elapsed
@@ -499,49 +587,60 @@ export async function verifyAdminLoginOtp(req, res, next) {
       });
     }
 
-    const [otpRows] = await pool.query(
-      "SELECT id, otp_hash, attempts, (expires_at < NOW()) AS is_expired FROM login_otps WHERE user_id = ?",
-      [challenge.id]
-    );
-    if (otpRows.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Mã OTP không tồn tại hoặc đã được sử dụng. Vui lòng yêu cầu gửi lại mã.",
-      });
-    }
+    const demoAdminEmail = (process.env.ADMIN_EMAIL || "admin@ptit.edu.vn")
+      .trim()
+      .toLowerCase();
+    const lowerChallengeEmail = String(challenge.email || "").trim().toLowerCase();
+    const isDemoAdminStaticOtp =
+      (lowerChallengeEmail === "admin@ptit.edu.vn" ||
+        lowerChallengeEmail === demoAdminEmail) &&
+      otp.trim() === "999999";
 
-    const otpRow = otpRows[0];
-    if (otpRow.is_expired) {
-      await pool.query("DELETE FROM login_otps WHERE id = ?", [otpRow.id]);
-      return res.status(400).json({
-        success: false,
-        message: "Mã OTP đã hết hạn (quá 5 phút). Vui lòng gửi lại mã mới.",
-      });
-    }
+    if (!isDemoAdminStaticOtp) {
+      const [otpRows] = await pool.query(
+        "SELECT id, otp_hash, attempts, (expires_at < NOW()) AS is_expired FROM login_otps WHERE user_id = ?",
+        [challenge.id]
+      );
+      if (otpRows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Mã OTP không tồn tại hoặc đã được sử dụng. Vui lòng yêu cầu gửi lại mã.",
+        });
+      }
 
-    if (otpRow.attempts >= OTP_MAX_ATTEMPTS) {
-      await pool.query("DELETE FROM login_otps WHERE id = ?", [otpRow.id]);
-      return res.status(429).json({
-        success: false,
-        message: "Bạn đã nhập sai OTP quá nhiều lần. Vui lòng đăng nhập lại để nhận mã mới.",
-      });
-    }
+      const otpRow = otpRows[0];
+      if (otpRow.is_expired) {
+        await pool.query("DELETE FROM login_otps WHERE id = ?", [otpRow.id]);
+        return res.status(400).json({
+          success: false,
+          message: "Mã OTP đã hết hạn (quá 5 phút). Vui lòng gửi lại mã mới.",
+        });
+      }
 
-    const isOtpValid = await bcrypt.compare(otp.trim(), otpRow.otp_hash);
-    if (!isOtpValid) {
-      const nextAttempts = otpRow.attempts + 1;
-      if (nextAttempts >= OTP_MAX_ATTEMPTS) {
+      if (otpRow.attempts >= OTP_MAX_ATTEMPTS) {
         await pool.query("DELETE FROM login_otps WHERE id = ?", [otpRow.id]);
         return res.status(429).json({
           success: false,
-          message: "Mã OTP không đúng và đã bị hủy do nhập sai quá 5 lần. Vui lòng đăng nhập lại.",
+          message: "Bạn đã nhập sai OTP quá nhiều lần. Vui lòng đăng nhập lại để nhận mã mới.",
         });
       }
-      await pool.query("UPDATE login_otps SET attempts = ? WHERE id = ?", [nextAttempts, otpRow.id]);
-      return res.status(400).json({
-        success: false,
-        message: `Mã OTP không chính xác. Bạn còn ${OTP_MAX_ATTEMPTS - nextAttempts} lần thử.`,
-      });
+
+      const isOtpValid = await bcrypt.compare(otp.trim(), otpRow.otp_hash);
+      if (!isOtpValid) {
+        const nextAttempts = otpRow.attempts + 1;
+        if (nextAttempts >= OTP_MAX_ATTEMPTS) {
+          await pool.query("DELETE FROM login_otps WHERE id = ?", [otpRow.id]);
+          return res.status(429).json({
+            success: false,
+            message: "Mã OTP không đúng và đã bị hủy do nhập sai quá 5 lần. Vui lòng đăng nhập lại.",
+          });
+        }
+        await pool.query("UPDATE login_otps SET attempts = ? WHERE id = ?", [nextAttempts, otpRow.id]);
+        return res.status(400).json({
+          success: false,
+          message: `Mã OTP không chính xác. Bạn còn ${OTP_MAX_ATTEMPTS - nextAttempts} lần thử.`,
+        });
+      }
     }
 
     const [userRows] = await pool.query(

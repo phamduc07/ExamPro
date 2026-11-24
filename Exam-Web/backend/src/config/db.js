@@ -98,8 +98,8 @@ export async function initializeDatabase() {
       shuffle_questions TINYINT(1) NOT NULL DEFAULT 0,
       shuffle_options TINYINT(1) NOT NULL DEFAULT 0,
       anti_cheat TINYINT(1) NOT NULL DEFAULT 0,
-      max_tab_switches INT NOT NULL DEFAULT 0,
-      max_attempts INT NOT NULL DEFAULT 0,
+      max_tab_switches INT DEFAULT NULL,
+      max_attempts INT DEFAULT NULL,
       open_at DATETIME DEFAULT NULL,
       close_at DATETIME DEFAULT NULL,
       created_by INT DEFAULT NULL,
@@ -219,8 +219,8 @@ export async function initializeDatabase() {
 
   await ensureSchemaColumns();
 
-  const adminEmail = (process.env.ADMIN_EMAIL || "teacher@ptit.edu.vn").trim().toLowerCase();
-  const adminPassword = process.env.ADMIN_PASSWORD || "123456";
+  const adminEmail = (process.env.ADMIN_EMAIL || "admin@ptit.edu.vn").trim().toLowerCase();
+  const adminPassword = process.env.ADMIN_PASSWORD || "Admin@123";
 
   const [userCountRows] = await pool.query("SELECT COUNT(*) AS cnt FROM users");
   if (userCountRows[0].cnt === 0) {
@@ -229,9 +229,9 @@ export async function initializeDatabase() {
     const studentPass = await bcrypt.hash("123456", 10);
 
     const [teacherRes] = await pool.query(
-      `INSERT INTO users (full_name, email, password_hash, role, student_code)
-       VALUES (?, ?, ?, 'TEACHER', 'GV001')`,
-      ["Quản trị viên PTIT", adminEmail, teacherPass]
+      `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, student_code)
+       VALUES (?, ?, ?, 'TEACHER', 1, 'GV001')`,
+      ["Quản trị viên Hệ thống (PTIT)", adminEmail, teacherPass]
     );
     const teacherId = teacherRes.insertId;
 
@@ -626,10 +626,16 @@ async function ensureSchemaColumns() {
     "ALTER TABLE exams ADD COLUMN anti_cheat TINYINT(1) NOT NULL DEFAULT 0 AFTER shuffle_options"
   );
   await safeAlter(
-    "ALTER TABLE exams ADD COLUMN max_tab_switches INT NOT NULL DEFAULT 0 AFTER anti_cheat"
+    "ALTER TABLE exams ADD COLUMN max_tab_switches INT DEFAULT NULL AFTER anti_cheat"
   );
   await safeAlter(
-    "ALTER TABLE exams ADD COLUMN max_attempts INT NOT NULL DEFAULT 0 AFTER max_tab_switches"
+    "ALTER TABLE exams ADD COLUMN max_attempts INT DEFAULT NULL AFTER max_tab_switches"
+  );
+  await safeAlter(
+    "ALTER TABLE exams MODIFY COLUMN max_tab_switches INT DEFAULT NULL"
+  );
+  await safeAlter(
+    "ALTER TABLE exams MODIFY COLUMN max_attempts INT DEFAULT NULL"
   );
   await safeAlter(
     "ALTER TABLE exams ADD COLUMN open_at DATETIME DEFAULT NULL AFTER max_attempts"
@@ -667,36 +673,38 @@ async function ensureSchemaColumns() {
 }
 
 async function syncExclusiveAdmin(adminEmail, adminPassword) {
-  const [targetRows] = await pool.query("SELECT * FROM users WHERE email = ?", [adminEmail]);
-  let adminId;
+  const [targetRows] = await pool.query(
+    `SELECT * FROM users
+     WHERE email = ? OR is_super_admin = 1
+     ORDER BY (email = ?) DESC, is_super_admin DESC, id ASC
+     LIMIT 1`,
+    [adminEmail, adminEmail]
+  );
+  const adminHash = await bcrypt.hash(adminPassword, 10);
 
   if (targetRows.length > 0) {
     const target = targetRows[0];
-    adminId = target.id;
-    if (target.role !== "TEACHER" || Number(target.is_super_admin) !== 1) {
-      await pool.query(
-        "UPDATE users SET role = 'TEACHER', is_super_admin = 1, student_code = COALESCE(student_code, 'GV001') WHERE id = ?",
-        [adminId]
-      );
-    }
-  } else {
-    const [existingTeachers] = await pool.query(
-      "SELECT * FROM users WHERE role = 'TEACHER' ORDER BY id ASC LIMIT 1"
+    await pool.query(
+      `UPDATE users
+       SET full_name = ?, email = ?, password_hash = ?, role = 'TEACHER', is_super_admin = 1,
+           must_change_password = 0, failed_login_attempts = 0, locked_until = NULL
+       WHERE id = ?`,
+      ["Quản trị viên Hệ thống (PTIT)", adminEmail, adminHash, target.id]
     );
-    if (existingTeachers.length > 0) {
-      adminId = existingTeachers[0].id;
-      await pool.query(
-        "UPDATE users SET email = ?, is_super_admin = 1, student_code = COALESCE(student_code, 'GV001') WHERE id = ?",
-        [adminEmail, adminId]
-      );
-    } else {
-      const adminHash = await bcrypt.hash(adminPassword, 10);
-      const [inserted] = await pool.query(
-        `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, student_code)
-         VALUES (?, ?, ?, 'TEACHER', 1, 'GV001')`,
-        ["Quản trị viên PTIT", adminEmail, adminHash]
-      );
-      adminId = inserted.insertId;
-    }
+  } else {
+    await pool.query(
+      `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, must_change_password, student_code)
+       VALUES (?, ?, ?, 'TEACHER', 1, 0, NULL)
+       ON DUPLICATE KEY UPDATE
+         full_name = VALUES(full_name),
+         password_hash = VALUES(password_hash),
+         role = 'TEACHER',
+         is_super_admin = 1,
+         must_change_password = 0,
+         failed_login_attempts = 0,
+         locked_until = NULL`,
+      ["Quản trị viên Hệ thống (PTIT)", adminEmail, adminHash]
+    );
   }
+  console.log(`✅ Đã đồng bộ tài khoản Super Admin: ${adminEmail}`);
 }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
+import { useDialog } from "../../context/DialogContext";
 import { MAJOR_GROUP_LABELS } from "../../utils/ptitHelper";
 
 const EXAM_DRAFT_KEY = "ptit_exam_draft";
@@ -69,8 +70,8 @@ const emptyExam = {
   shuffleQuestions: 0,
   shuffleOptions: 0,
   antiCheat: 0,
-  maxTabSwitches: "0",
-  maxAttempts: "0",
+  maxTabSwitches: null,
+  maxAttempts: null,
   openAt: "",
   closeAt: "",
   questionIds: [],
@@ -79,6 +80,7 @@ const emptyExam = {
 export default function ExamManagerPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const { showToast, confirmDialog } = useDialog();
 
   const [activeTab, setActiveTab] = useState("EXAMS");
   const [exams, setExams] = useState([]);
@@ -230,8 +232,16 @@ export default function ExamManagerPage() {
       shuffleQuestions: sessionTemplateExam.shuffle_questions ? 1 : 0,
       shuffleOptions: sessionTemplateExam.shuffle_options ? 1 : 0,
       antiCheat: sessionTemplateExam.anti_cheat ? 1 : 0,
-      maxTabSwitches: String(Number(sessionTemplateExam.max_tab_switches) || 0),
-      maxAttempts: String(Number(sessionTemplateExam.max_attempts) || 0),
+      maxTabSwitches:
+        sessionTemplateExam.max_tab_switches === null ||
+        sessionTemplateExam.max_tab_switches === undefined
+          ? null
+          : String(Number(sessionTemplateExam.max_tab_switches)),
+      maxAttempts:
+        sessionTemplateExam.max_attempts === null ||
+        sessionTemplateExam.max_attempts === undefined
+          ? null
+          : String(Number(sessionTemplateExam.max_attempts)),
     }));
     if (Number(sessionTemplateExam.question_count) > 0) {
       setRandomConfig((prev) => ({
@@ -495,8 +505,14 @@ export default function ExamManagerPage() {
         shuffleQuestions: detail.shuffle_questions ? 1 : 0,
         shuffleOptions: detail.shuffle_options ? 1 : 0,
         antiCheat: detail.anti_cheat ? 1 : 0,
-        maxTabSwitches: String(Number(detail.max_tab_switches) || 0),
-        maxAttempts: String(Number(detail.max_attempts) || 0),
+        maxTabSwitches:
+          detail.max_tab_switches === null || detail.max_tab_switches === undefined
+            ? null
+            : String(Number(detail.max_tab_switches)),
+        maxAttempts:
+          detail.max_attempts === null || detail.max_attempts === undefined
+            ? null
+            : String(Number(detail.max_attempts)),
         openAt: toDateTimeLocalValue(detail.open_at),
         closeAt: toDateTimeLocalValue(detail.close_at),
         questionIds: (detail.questions || []).map((q) => q.id),
@@ -508,7 +524,7 @@ export default function ExamManagerPage() {
       });
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err) {
-      alert(err.response?.data?.message || "Không thể nhân bản đề thi.");
+      showToast(err.response?.data?.message || "Không thể nhân bản đề thi.", "error");
     }
   };
 
@@ -543,8 +559,14 @@ export default function ExamManagerPage() {
       examShift: !editingId && sessionMode === "FREE" ? "" : form.examShift,
       durationMinutes: Number(form.durationMinutes) || 25,
       passScore: form.passScore === "" ? 5 : Number(form.passScore),
-      maxTabSwitches: Number(form.maxTabSwitches) || 0,
-      maxAttempts: Number(form.maxAttempts) || 0,
+      maxTabSwitches:
+        form.maxTabSwitches === null || form.maxTabSwitches === ""
+          ? null
+          : Number(form.maxTabSwitches),
+      maxAttempts:
+        form.maxAttempts === null || form.maxAttempts === ""
+          ? null
+          : Number(form.maxAttempts),
       openAt: form.openAt ? new Date(form.openAt).toISOString() : null,
       closeAt: form.closeAt ? new Date(form.closeAt).toISOString() : null,
     };
@@ -596,8 +618,14 @@ export default function ExamManagerPage() {
         shuffleQuestions: detail.shuffle_questions ? 1 : 0,
         shuffleOptions: detail.shuffle_options ? 1 : 0,
         antiCheat: detail.anti_cheat ? 1 : 0,
-        maxTabSwitches: String(Number(detail.max_tab_switches) || 0),
-        maxAttempts: String(Number(detail.max_attempts) || 0),
+        maxTabSwitches:
+          detail.max_tab_switches === null || detail.max_tab_switches === undefined
+            ? null
+            : String(Number(detail.max_tab_switches)),
+        maxAttempts:
+          detail.max_attempts === null || detail.max_attempts === undefined
+            ? null
+            : String(Number(detail.max_attempts)),
         openAt: toDateTimeLocalValue(detail.open_at),
         closeAt: toDateTimeLocalValue(detail.close_at),
         questionIds: (detail.questions || []).map((q) => q.id),
@@ -605,12 +633,18 @@ export default function ExamManagerPage() {
       setActiveTab("EXAMS");
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err) {
-      alert(err.response?.data?.message || "Không thể tải chi tiết đề thi để chỉnh sửa.");
+      showToast(err.response?.data?.message || "Không thể tải chi tiết đề thi để chỉnh sửa.", "error");
     }
   };
 
   const handleDeleteExam = async (exam) => {
-    if (!window.confirm(`Xóa đề thi "${exam.title}"?`)) return;
+    const ok = await confirmDialog({
+      title: "Xóa đề thi",
+      message: `Xóa đề thi "${exam.title}"?`,
+      confirmText: "Xóa đề thi",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
       await axiosClient.delete(`/exams/${exam.id}`);
       setNotice({ type: "success", text: "🗑️ Đã xóa đề thi thành công!" });
@@ -624,9 +658,12 @@ export default function ExamManagerPage() {
   };
 
   const handleReopenExam = async (exam) => {
-    if (!window.confirm(`Mở lại đề thi "${exam.title}" để sinh viên có thể tiếp tục làm bài?`)) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: "Mở lại đề thi",
+      message: `Mở lại đề thi "${exam.title}" để sinh viên có thể tiếp tục làm bài?`,
+      confirmText: "Mở lại đề",
+    });
+    if (!ok) return;
     try {
       const res = await axiosClient.patch(`/exams/${exam.id}/reopen`);
       setNotice({
@@ -643,7 +680,13 @@ export default function ExamManagerPage() {
   };
 
   const handleDeleteSubmission = async (id) => {
-    if (!window.confirm("Bạn muốn xóa kết quả bài thi này?")) return;
+    const ok = await confirmDialog({
+      title: "Xóa kết quả bài thi",
+      message: "Bạn muốn xóa kết quả bài thi này?",
+      confirmText: "Xóa kết quả",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
       await axiosClient.delete(`/submissions/${id}`);
       setNotice({ type: "success", text: "🗑️ Đã xóa lượt nộp bài!" });
@@ -1059,12 +1102,15 @@ export default function ExamManagerPage() {
                     type="checkbox"
                     disabled={isSessionLocked}
                     checked={Boolean(form.antiCheat)}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      const checked = e.target.checked;
                       setForm((p) => ({
                         ...p,
-                        antiCheat: e.target.checked ? 1 : 0,
-                      }))
-                    }
+                        antiCheat: checked ? 1 : 0,
+                        maxTabSwitches: checked ? "1" : null,
+                        maxAttempts: checked ? "1" : null,
+                      }));
+                    }}
                   />
                   <div>
                     <strong style={{ color: form.antiCheat ? "#fecdd3" : "var(--text-main)" }}>
@@ -1078,37 +1124,100 @@ export default function ExamManagerPage() {
 
                 <div className="form-row-2">
                   <div className="form-field">
-                    <label>Giới hạn rời tab tối đa (0 = không giới hạn)</label>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      placeholder="0"
-                      disabled={isSessionLocked}
-                      value={form.maxTabSwitches}
-                      onChange={(e) =>
-                        setForm((p) => ({
-                          ...p,
-                          maxTabSwitches: sanitizeIntInput(e.target.value),
-                        }))
-                      }
-                    />
+                    <label>Giới hạn rời tab tối đa</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="Không giới hạn"
+                        disabled={isSessionLocked || form.maxTabSwitches === null}
+                        value={form.maxTabSwitches === null ? "" : form.maxTabSwitches}
+                        onChange={(e) =>
+                          setForm((p) => ({
+                            ...p,
+                            maxTabSwitches: sanitizeIntInput(e.target.value),
+                          }))
+                        }
+                        style={{ flex: 1 }}
+                      />
+                      <label
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          whiteSpace: "nowrap",
+                          cursor: isSessionLocked ? "not-allowed" : "pointer",
+                          fontSize: "0.84rem",
+                          color: "var(--text-secondary)",
+                          margin: 0,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={isSessionLocked}
+                          checked={form.maxTabSwitches === null}
+                          onChange={(e) =>
+                            setForm((p) => ({
+                              ...p,
+                              maxTabSwitches: e.target.checked ? null : "0",
+                            }))
+                          }
+                          style={{ width: "auto" }}
+                        />
+                        Không giới hạn
+                      </label>
+                    </div>
+                    <div className="sub-text">
+                      Gợi ý: 1 lần cảnh báo trước khi khóa bài; đặt 0 nếu muốn khóa ngay lập tức
+                    </div>
                   </div>
 
                   <div className="form-field">
-                    <label>Giới hạn số lượt thi / SV (0 = không giới hạn)</label>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      placeholder="0"
-                      disabled={isSessionLocked}
-                      value={form.maxAttempts}
-                      onChange={(e) =>
-                        setForm((p) => ({
-                          ...p,
-                          maxAttempts: sanitizeIntInput(e.target.value),
-                        }))
-                      }
-                    />
+                    <label>Giới hạn số lượt thi / SV</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="Không giới hạn"
+                        disabled={isSessionLocked || form.maxAttempts === null}
+                        value={form.maxAttempts === null ? "" : form.maxAttempts}
+                        onChange={(e) =>
+                          setForm((p) => ({
+                            ...p,
+                            maxAttempts: sanitizeIntInput(e.target.value),
+                          }))
+                        }
+                        style={{ flex: 1 }}
+                      />
+                      <label
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          whiteSpace: "nowrap",
+                          cursor: isSessionLocked ? "not-allowed" : "pointer",
+                          fontSize: "0.84rem",
+                          color: "var(--text-secondary)",
+                          margin: 0,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={isSessionLocked}
+                          checked={form.maxAttempts === null}
+                          onChange={(e) =>
+                            setForm((p) => ({
+                              ...p,
+                              maxAttempts: e.target.checked ? null : "0",
+                            }))
+                          }
+                          style={{ width: "auto" }}
+                        />
+                        Không giới hạn
+                      </label>
+                    </div>
                   </div>
                 </div>
 
@@ -1560,12 +1669,14 @@ export default function ExamManagerPage() {
                     ⏱️ {form.durationMinutes} phút • 📝 {selectedQuestionObjects.length} câu • 🎯 Điểm đạt: {form.passScore}/10
                     {form.shuffleQuestions ? " • 🔀 Trộn câu hỏi" : ""}
                     {form.shuffleOptions ? " • 🔀 Trộn đáp án" : ""}
-                    {Number(form.maxTabSwitches) > 0
-                      ? ` • 🛡️ Tối đa ${form.maxTabSwitches} lần rời tab`
-                      : ""}
-                    {Number(form.maxAttempts) > 0
+                    {form.maxTabSwitches !== null
+                      ? Number(form.maxTabSwitches) === 0
+                        ? " • 🛡️ 0 lần rời tab (Nghiêm ngặt)"
+                        : ` • 🛡️ Tối đa ${form.maxTabSwitches} lần rời tab`
+                      : " • 🛡️ Rời tab: Không giới hạn"}
+                    {form.maxAttempts !== null
                       ? ` • 🔁 Tối đa ${form.maxAttempts} lượt`
-                      : ""}
+                      : " • 🔁 Lượt thi: Không giới hạn"}
                   </p>
                 </div>
                 <button

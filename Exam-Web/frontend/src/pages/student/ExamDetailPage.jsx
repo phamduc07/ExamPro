@@ -114,6 +114,23 @@ export default function ExamDetailPage() {
                 đang phân vân để dễ dàng quay lại kiểm tra trước khi nộp.
               </li>
               <li>
+                Giới hạn rời tab:{" "}
+                <strong>
+                  {exam.max_tab_switches === null || exam.max_tab_switches === undefined
+                    ? "Không giới hạn"
+                    : Number(exam.max_tab_switches) === 0
+                    ? "0 lần (Nghiêm ngặt - Cấm rời tab)"
+                    : `${exam.max_tab_switches} lần`}
+                </strong>
+                . Giới hạn số lượt thi:{" "}
+                <strong>
+                  {exam.max_attempts === null || exam.max_attempts === undefined
+                    ? "Không giới hạn"
+                    : `${exam.max_attempts} lượt`}
+                </strong>
+                .
+              </li>
+              <li>
                 Khi hết thời gian quy định, hệ thống sẽ{" "}
                 <strong>tự động thu bài</strong> và chấm điểm dựa trên các phương án
                 bạn đã chọn.
@@ -137,7 +154,19 @@ export default function ExamDetailPage() {
               type="button"
               className="btn-start-exam"
               disabled={!agreed || questionCount === 0}
-              onClick={() => navigate(`/exam-room/${exam.id}`)}
+              onClick={() => {
+                if (exam?.anti_cheat && !document.fullscreenElement) {
+                  const el = document.documentElement;
+                  const reqFs =
+                    el.requestFullscreen ||
+                    el.webkitRequestFullscreen ||
+                    el.msRequestFullscreen;
+                  if (reqFs) {
+                    Promise.resolve(reqFs.call(el)).catch(() => {});
+                  }
+                }
+                navigate(`/exam-room/${exam.id}`);
+              }}
             >
               🚀 Bắt đầu làm bài ngay ({exam.duration_minutes} phút)
             </button>

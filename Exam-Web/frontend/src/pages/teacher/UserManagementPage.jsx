@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axiosClient from "../../api/axiosClient";
 import { useAuth } from "../../context/AuthContext";
+import { useDialog } from "../../context/DialogContext";
 import { MAJOR_GROUP_LABELS } from "../../utils/ptitHelper";
 
 function formatDateTime(raw) {
@@ -23,6 +24,7 @@ function formatDateTime(raw) {
 
 export default function UserManagementPage() {
   const { user } = useAuth();
+  const { confirmDialog } = useDialog();
   const isSuperAdmin = Number(user?.is_super_admin) === 1;
 
   const [activeTab, setActiveTab] = useState("STUDENTS");
@@ -144,13 +146,13 @@ export default function UserManagementPage() {
   };
 
   const handleRevokeAdmin = async (adm) => {
-    if (
-      !window.confirm(
-        `Thu hồi quyền Admin của "${adm.full_name}" (${adm.email})? Mọi phiên đăng nhập của người này sẽ bị đăng xuất ngay lập tức.`
-      )
-    ) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: "Thu hồi quyền Admin",
+      message: `Thu hồi quyền Admin của "${adm.full_name}" (${adm.email})? Mọi phiên đăng nhập của người này sẽ bị đăng xuất ngay lập tức.`,
+      confirmText: "Thu hồi quyền",
+      tone: "danger",
+    });
+    if (!ok) return;
     setNotice({ type: "", text: "" });
     try {
       const res = await axiosClient.patch(`/auth/admins/${adm.id}/revoke`);

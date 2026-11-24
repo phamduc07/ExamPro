@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
+import { useDialog } from "../../context/DialogContext";
 import {
   parseBulkQuestions,
   SAMPLE_BULK_QUESTIONS,
@@ -49,6 +50,7 @@ function computeTextSimilarity(a, b) {
 export default function QuestionBankPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const { confirmDialog } = useDialog();
   const initialSubjectId = searchParams.get("subject_id") || "";
   const isFromExamBuilder = searchParams.get("from") === "exam-builder";
 
@@ -275,9 +277,11 @@ export default function QuestionBankPage() {
     if (saving) return;
 
     if (editingQId && editingQuestionMeta.submissionCount > 0) {
-      const confirmed = window.confirm(
-        `Câu hỏi này đang nằm trong ${editingQuestionMeta.examCount} đề thi và liên quan tới ${editingQuestionMeta.submissionCount} bài đã nộp.\n\nBạn có chắc chắn muốn lưu cập nhật và tự động chấm lại điểm cho toàn bộ ${editingQuestionMeta.submissionCount} bài nộp này không?`
-      );
+      const confirmed = await confirmDialog({
+        title: "Cập nhật câu hỏi & Chấm lại điểm",
+        message: `Câu hỏi này đang nằm trong ${editingQuestionMeta.examCount} đề thi và liên quan tới ${editingQuestionMeta.submissionCount} bài đã nộp.\n\nBạn có chắc chắn muốn lưu cập nhật và tự động chấm lại điểm cho toàn bộ ${editingQuestionMeta.submissionCount} bài nộp này không?`,
+        confirmText: "Lưu & Chấm lại",
+      });
       if (!confirmed) return;
     }
 
@@ -335,7 +339,13 @@ export default function QuestionBankPage() {
   };
 
   const handleDeleteQuestion = async (id) => {
-    if (!window.confirm(`Bạn chắc chắn muốn xóa câu hỏi #${id}?`)) return;
+    const ok = await confirmDialog({
+      title: "Xóa câu hỏi",
+      message: `Bạn chắc chắn muốn xóa câu hỏi #${id}?`,
+      confirmText: "Xóa câu hỏi",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
       await axiosClient.delete(`/questions/${id}`);
       setNotice({ type: "success", text: "🗑️ Đã xóa câu hỏi khỏi ngân hàng!" });
@@ -384,12 +394,13 @@ export default function QuestionBankPage() {
   };
 
   const handleDeleteSubject = async (sub) => {
-    if (
-      !window.confirm(
-        `Xóa môn học "${sub.name}"? Chỉ xóa được môn chưa có câu hỏi và đề thi.`
-      )
-    )
-      return;
+    const ok = await confirmDialog({
+      title: "Xóa môn học",
+      message: `Xóa môn học "${sub.name}"? Chỉ xóa được môn chưa có câu hỏi và đề thi.`,
+      confirmText: "Xóa môn học",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
       await axiosClient.delete(`/subjects/${sub.id}`);
       setNotice({ type: "success", text: "🗑️ Đã xóa môn học thành công!" });

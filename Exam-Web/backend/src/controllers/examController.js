@@ -152,7 +152,7 @@ export async function getExamById(req, res, next) {
           message: "Đề thi này không thuộc khối ngành của bạn.",
         });
       }
-      if (Number(exam.max_attempts) > 0) {
+      if (exam.max_attempts !== null && exam.max_attempts !== undefined) {
         const [attemptRows] = await pool.query(
           "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ? AND student_id = ?",
           [id, req.user.id]
@@ -264,12 +264,17 @@ async function saveExam(req, res, next, isUpdate) {
       shuffleQuestions = 0,
       shuffleOptions = 0,
       antiCheat = 0,
-      maxTabSwitches = 0,
-      maxAttempts = 0,
+      maxTabSwitches = null,
+      maxAttempts = null,
       openAt = null,
       closeAt = null,
       questionIds,
     } = req.body;
+
+    const parseOptionalLimit = (val) => {
+      if (val === null || val === undefined || val === "") return null;
+      return Number(val);
+    };
 
     const cleanSession = String(examSession || "").trim() || null;
     const cleanShift = cleanSession ? String(examShift || "").trim() || null : null;
@@ -318,8 +323,8 @@ async function saveExam(req, res, next, isUpdate) {
           shuffleQuestions ? 1 : 0,
           shuffleOptions ? 1 : 0,
           antiCheat ? 1 : 0,
-          Number(maxTabSwitches) || 0,
-          Number(maxAttempts) || 0,
+          parseOptionalLimit(maxTabSwitches),
+          parseOptionalLimit(maxAttempts),
           resolvedOpenAt,
           resolvedCloseAt,
           req.params.id,
@@ -350,8 +355,8 @@ async function saveExam(req, res, next, isUpdate) {
     let finalShuffleQuestions = shuffleQuestions ? 1 : 0;
     let finalShuffleOptions = shuffleOptions ? 1 : 0;
     let finalAntiCheat = antiCheat ? 1 : 0;
-    let finalMaxTabSwitches = Number(maxTabSwitches) || 0;
-    let finalMaxAttempts = Number(maxAttempts) || 0;
+    let finalMaxTabSwitches = parseOptionalLimit(maxTabSwitches);
+    let finalMaxAttempts = parseOptionalLimit(maxAttempts);
 
     if (!isUpdate && sessionMode === "NEW_SESSION") {
       if (!cleanSession) {
@@ -425,8 +430,8 @@ async function saveExam(req, res, next, isUpdate) {
         finalShuffleQuestions = tpl.shuffle_questions ? 1 : 0;
         finalShuffleOptions = tpl.shuffle_options ? 1 : 0;
         finalAntiCheat = tpl.anti_cheat ? 1 : 0;
-        finalMaxTabSwitches = Number(tpl.max_tab_switches) || 0;
-        finalMaxAttempts = Number(tpl.max_attempts) || 0;
+        finalMaxTabSwitches = parseOptionalLimit(tpl.max_tab_switches);
+        finalMaxAttempts = parseOptionalLimit(tpl.max_attempts);
       }
     }
 

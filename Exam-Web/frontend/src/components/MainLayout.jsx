@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
@@ -7,6 +7,28 @@ export default function MainLayout() {
   const { user, logout, changePassword } = useAuth();
   const navigate = useNavigate();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef(null);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const handleClickOutside = (event) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(event.target)) {
+        setUserMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setUserMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [userMenuOpen]);
 
   const [showChangePwdModal, setShowChangePwdModal] = useState(false);
   const [pwdForm, setPwdForm] = useState({
@@ -59,6 +81,17 @@ export default function MainLayout() {
   };
 
   const isTeacher = user?.role === "TEACHER";
+  const roleLabel = isTeacher
+    ? Number(user?.is_super_admin) === 1
+      ? "👑 Super Admin"
+      : "Admin"
+    : `SV • ${user?.studentCode || "PTIT"}${
+        user?.majorGroup === "KY_THUAT"
+          ? " • Kỹ thuật"
+          : user?.majorGroup === "KINH_TE"
+          ? " • Kinh tế"
+          : ""
+      }`;
 
   return (
     <div className="app-wrapper">
@@ -149,45 +182,69 @@ export default function MainLayout() {
             )}
           </nav>
 
-          <div className="user-controls">
-            <div className="user-profile-pill">
+          <div className="user-controls" ref={userMenuRef}>
+            <button
+              type="button"
+              className={`user-profile-pill user-menu-trigger ${userMenuOpen ? "open" : ""}`}
+              onClick={() => setUserMenuOpen((prev) => !prev)}
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
+            >
               <div className="user-avatar">
                 {user?.fullName ? user.fullName.charAt(0).toUpperCase() : "U"}
               </div>
               <div className="user-meta">
                 <span className={`role-tag ${isTeacher ? "teacher" : "student"}`}>
-                  {isTeacher
-                    ? Number(user?.is_super_admin) === 1
-                      ? "👑 Super Admin"
-                      : "Admin"
-                    : `SV • ${user?.studentCode || "PTIT"}${
-                        user?.majorGroup === "KY_THUAT"
-                          ? " • Kỹ thuật"
-                          : user?.majorGroup === "KINH_TE"
-                          ? " • Kinh tế"
-                          : ""
-                      }`}
+                  {roleLabel}
                 </span>
               </div>
-            </div>
-          </div>
+              <span className="user-menu-caret" aria-hidden="true">
+                ▾
+              </span>
+            </button>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <button
-              type="button"
-              className="btn-secondary"
-              style={{ padding: "7px 12px", fontSize: "0.82rem" }}
-              onClick={() => {
-                setPwdError("");
-                setPwdForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
-                setShowChangePwdModal(true);
-              }}
-            >
-              🔑 Đổi mật khẩu
-            </button>
-            <button type="button" className="btn-logout" onClick={handleLogout}>
-              Đăng xuất
-            </button>
+            {userMenuOpen && (
+              <div className="user-dropdown-menu" role="menu">
+                <div className="user-dropdown-header">
+                  <div className="user-dropdown-name">
+                    {user?.fullName || user?.username || "Người dùng"}
+                  </div>
+                  <div className={`user-dropdown-role ${isTeacher ? "teacher" : "student"}`}>
+                    {roleLabel}
+                  </div>
+                </div>
+
+                <div className="user-dropdown-divider" />
+
+                <button
+                  type="button"
+                  className="user-dropdown-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setUserMenuOpen(false);
+                    setPwdError("");
+                    setPwdForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+                    setShowChangePwdModal(true);
+                  }}
+                >
+                  <span>🔑</span>
+                  <span>Đổi mật khẩu</span>
+                </button>
+
+                <button
+                  type="button"
+                  className="user-dropdown-item danger"
+                  role="menuitem"
+                  onClick={() => {
+                    setUserMenuOpen(false);
+                    handleLogout();
+                  }}
+                >
+                  <span>🚪</span>
+                  <span>Đăng xuất</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -195,21 +252,6 @@ export default function MainLayout() {
       <main className="main-content container">
         <Outlet />
       </main>
-
-      <footer className="app-footer">
-        <div className="container footer-inner">
-          <div>
-            <strong>HỌC VIỆN CÔNG NGHỆ BƯU CHÍNH VIỄN THÔNG (PTIT)</strong>
-            <p>Bài tập lớn Cuối kỳ — Hệ thống Thi Trắc nghiệm Trực tuyến Fullstack (React + Express + MySQL)</p>
-          </div>
-          <div className="footer-tech-badges">
-            <span>React Router v6</span>
-            <span>Zustand + Context</span>
-            <span>Express REST API</span>
-            <span>MySQL 8.0</span>
-          </div>
-        </div>
-      </footer>
 
       {showChangePwdModal &&
         createPortal(
