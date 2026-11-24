@@ -1,0 +1,804 @@
+import { pool } from "../config/db.js";
+import { validateExam } from "../utils/validation.js";
+
+async function logAdminAction(
+  dbClient,
+  { user, actionType, examTitle, subjectCode = null, details = null }
+) {
+  await dbClient.query(
+    `INSERT INTO admin_logs (admin_id, admin_name, action_type, exam_title, subject_code, details)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      user?.id || null,
+      user?.fullName || "Quản trị viên",
+      actionType,
+      examTitle,
+      subjectCode,
+      details,
+    ]
+  );
+}
+
+function shuffleArray(list) {
+  const arr = [...list];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+async function resolveStudentMajorGroup(user) {
+  if (!user || user.role !== "STUDENT") return null;
+  if (user.majorGroup) return user.majorGroup;
+  const [rows] = await pool.query("SELECT major_group FROM users WHERE id = ?", [user.id]);
+  return rows[0]?.major_group || null;
+}
+
+export async function getExams(req, res, next) {
+  try {
+    const { subjectId, search, publishedOnly, majorGroup } = req.query;
+
+    let sql = `
+      SELECT
+        e.*,
+        s.name AS subject_name,
+        s.code AS subject_code,
+        u.full_name AS teacher_name,
+        (SELECT COUNT(*) FROM exam_questions eq WHERE eq.exam_id = e.id) AS question_count,
+        (SELECT GROUP_CONCAT(eq.question_id ORDER BY eq.order_index ASC) FROM exam_questions eq WHERE eq.exam_id = e.id) AS question_ids_csv,
+        (SELECT COUNT(*) FROM submissions sub WHERE sub.exam_id = e.id) AS submission_count
+      FROM exams e
+      INNER JOIN subjects s ON e.subject_id = s.id
+      LEFT JOIN users u ON e.created_by = u.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (publishedOnly === "true" || req.user?.role === "STUDENT") {
+      sql += " AND e.is_published = 1";
+    }
+    if (req.user?.role === "STUDENT") {
+      const studentMajorGroup = await resolveStudentMajorGroup(req.user);
+      if (studentMajorGroup) {
+        sql += " AND (e.major_group = 'ALL' OR e.major_group = ?)";
+        params.push(studentMajorGroup);
+      } else {
+        sql += " AND e.major_group = 'ALL'";
+      }
+    } else if (majorGroup && ["ALL", "KY_THUAT", "KINH_TE"].includes(majorGroup)) {
+      sql += " AND e.major_group = ?";
+      params.push(majorGroup);
+    }
+    if (subjectId) {
+      sql += " AND e.subject_id = ?";
+      params.push(Number(subjectId));
+    }
+    if (search) {
+      sql += " AND (e.title LIKE ? OR s.name LIKE ?)";
+      params.push(`%${search.trim()}%`, `%${search.trim()}%`);
+    }
+
+    sql += " ORDER BY e.id DESC";
+
+    const [rows] = await pool.query(sql, params);
+    const formatted = rows.map(({ question_ids_csv, ...rest }) => ({
+      ...rest,
+      question_ids: question_ids_csv
+        ? String(question_ids_csv)
+            .split(",")
+            .map(Number)
+            .filter(Boolean)
+        : [],
+    }));
+    return res.status(200).json({
+      success: true,
+      data: formatted,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getExamById(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { mode } = req.query;
+
+    const [examRows] = await pool.query(
+      `
+      SELECT
+        e.*,
+        s.name AS subject_name,
+        s.code AS subject_code,
+        u.full_name AS teacher_name
+      FROM exams e
+      INNER JOIN subjects s ON e.subject_id = s.id
+      LEFT JOIN users u ON e.created_by = u.id
+      WHERE e.id = ?
+      `,
+      [id]
+    );
+
+    if (examRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy đề thi này.",
+      });
+    }
+
+    const exam = examRows[0];
+    if (req.user.role === "STUDENT") {
+      if (!exam.is_published) {
+        return res.status(403).json({ success: false, message: "Đề thi này chưa được mở." });
+      }
+      const now = new Date();
+      if (exam.open_at && now < new Date(exam.open_at)) {
+        return res.status(403).json({
+          success: false,
+          message: `Đề thi chưa đến thời gian mở (${new Date(exam.open_at).toLocaleString("vi-VN")}).`,
+        });
+      }
+      if (exam.close_at && now > new Date(exam.close_at)) {
+        return res.status(403).json({
+          success: false,
+          message: "Đề thi đã hết hạn đóng đề.",
+        });
+      }
+      const studentMajorGroup = await resolveStudentMajorGroup(req.user);
+      if (exam.major_group && exam.major_group !== "ALL" && exam.major_group !== studentMajorGroup) {
+        return res.status(403).json({
+          success: false,
+          message: "Đề thi này không thuộc khối ngành của bạn.",
+        });
+      }
+      if (Number(exam.max_attempts) > 0) {
+        const [attemptRows] = await pool.query(
+          "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ? AND student_id = ?",
+          [id, req.user.id]
+        );
+        if (Number(attemptRows[0].cnt) >= Number(exam.max_attempts)) {
+          return res.status(403).json({
+            success: false,
+            message: `Bạn đã sử dụng hết ${exam.max_attempts} lượt làm bài cho đề thi này.`,
+          });
+        }
+      }
+    }
+
+    const [questionRows] = await pool.query(
+      `
+      SELECT
+        q.id,
+        q.subject_id,
+        q.content,
+        q.option_a,
+        q.option_b,
+        q.option_c,
+        q.option_d,
+        q.difficulty,
+        q.correct_answer,
+        q.explanation,
+        eq.order_index
+      FROM exam_questions eq
+      INNER JOIN questions q ON eq.question_id = q.id
+      WHERE eq.exam_id = ?
+      ORDER BY eq.order_index ASC, q.id ASC
+      `,
+      [id]
+    );
+
+    const isStudentTaking = req.user?.role === "STUDENT" || mode === "take";
+    let formattedQuestions = questionRows.map((q) => {
+      if (isStudentTaking) {
+        return {
+          id: q.id,
+          subject_id: q.subject_id,
+          content: q.content,
+          option_a: q.option_a,
+          option_b: q.option_b,
+          option_c: q.option_c,
+          option_d: q.option_d,
+          difficulty: q.difficulty,
+          order_index: q.order_index,
+        };
+      }
+      return q;
+    });
+
+    if (isStudentTaking && Boolean(exam.shuffle_questions)) {
+      formattedQuestions = shuffleArray(formattedQuestions);
+    }
+
+    if (req.user?.role === "STUDENT" && mode === "take") {
+      await pool.query(
+        `INSERT INTO exam_attempts (exam_id, user_id, started_at, status)
+         VALUES (?, ?, NOW(), 'IN_PROGRESS')
+         ON DUPLICATE KEY UPDATE
+           started_at = IF(status = 'IN_PROGRESS', started_at, NOW()),
+           status = 'IN_PROGRESS'`,
+        [id, req.user.id]
+      );
+    }
+
+    const [subCountRows] = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ?",
+      [id]
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...exam,
+        submission_count: Number(subCountRows[0]?.cnt || 0),
+        questions: formattedQuestions,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createExam(req, res, next) {
+  return saveExam(req, res, next, false);
+}
+
+export async function updateExam(req, res, next) {
+  return saveExam(req, res, next, true);
+}
+
+async function saveExam(req, res, next, isUpdate) {
+  let connection;
+  try {
+    const {
+      subjectId,
+      title,
+      description = "",
+      durationMinutes,
+      passScore,
+      isPublished,
+      majorGroup = "ALL",
+      sessionMode = "FREE",
+      examSession = "",
+      examShift = "",
+      shuffleQuestions = 0,
+      shuffleOptions = 0,
+      antiCheat = 0,
+      maxTabSwitches = 0,
+      maxAttempts = 0,
+      openAt = null,
+      closeAt = null,
+      questionIds,
+    } = req.body;
+
+    const cleanSession = String(examSession || "").trim() || null;
+    const cleanShift = cleanSession ? String(examShift || "").trim() || null : null;
+    const resolvedOpenAt = openAt ? new Date(openAt) : null;
+    const resolvedCloseAt = closeAt ? new Date(closeAt) : null;
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    let hasSubmissions = false;
+    if (isUpdate) {
+      const [exams] = await connection.query("SELECT id FROM exams WHERE id = ? FOR UPDATE", [req.params.id]);
+      if (!exams.length) throw Object.assign(new Error("Không tìm thấy đề thi."), { statusCode: 404 });
+      const [submissions] = await connection.query("SELECT id FROM submissions WHERE exam_id = ? LIMIT 1", [req.params.id]);
+      hasSubmissions = submissions.length > 0;
+    }
+
+    const message = validateExam(req.body, { isMetadataOnly: isUpdate && hasSubmissions });
+    if (message) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message });
+    }
+
+    if (isUpdate && hasSubmissions) {
+      const [metaRows] = await connection.query(
+        `SELECT s.code AS subject_code
+         FROM exams e
+         INNER JOIN subjects s ON e.subject_id = s.id
+         WHERE e.id = ?`,
+        [req.params.id]
+      );
+      await connection.query(
+        `UPDATE exams
+         SET title = ?, description = ?, is_published = ?,
+             exam_session = ?, exam_shift = ?,
+             shuffle_questions = ?, shuffle_options = ?, anti_cheat = ?,
+             max_tab_switches = ?, max_attempts = ?,
+             open_at = ?, close_at = ?
+         WHERE id = ?`,
+        [
+          title.trim(),
+          description.trim(),
+          isPublished ? 1 : 0,
+          cleanSession,
+          cleanShift,
+          shuffleQuestions ? 1 : 0,
+          shuffleOptions ? 1 : 0,
+          antiCheat ? 1 : 0,
+          Number(maxTabSwitches) || 0,
+          Number(maxAttempts) || 0,
+          resolvedOpenAt,
+          resolvedCloseAt,
+          req.params.id,
+        ]
+      );
+      await logAdminAction(connection, {
+        user: req.user,
+        actionType: "UPDATE_EXAM",
+        examTitle: title.trim(),
+        subjectCode: metaRows[0]?.subject_code || null,
+        details: "Cập nhật thông tin quản trị đề thi (giữ nguyên câu hỏi do đã có bài nộp)",
+      });
+      await connection.commit();
+      return res.status(200).json({
+        success: true,
+        message: "Đã cập nhật thông tin quản trị của đề thi (danh sách câu hỏi được giữ nguyên để bảo toàn lịch sử điểm).",
+        data: { id: Number(req.params.id), metadataOnly: true },
+      });
+    }
+
+    const [subjects] = await connection.query("SELECT id, code FROM subjects WHERE id = ?", [Number(subjectId)]);
+    if (!subjects.length) throw Object.assign(new Error("Môn học không tồn tại."), { statusCode: 400 });
+    const subjectCode = subjects[0].code;
+
+    let finalDuration = Number(durationMinutes);
+    let finalPassScore = Number(passScore);
+    let finalMajorGroup = majorGroup;
+    let finalShuffleQuestions = shuffleQuestions ? 1 : 0;
+    let finalShuffleOptions = shuffleOptions ? 1 : 0;
+    let finalAntiCheat = antiCheat ? 1 : 0;
+    let finalMaxTabSwitches = Number(maxTabSwitches) || 0;
+    let finalMaxAttempts = Number(maxAttempts) || 0;
+
+    if (!isUpdate && sessionMode === "NEW_SESSION") {
+      if (!cleanSession) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: "Vui lòng nhập tên đợt thi mới.",
+        });
+      }
+      const [dupSession] = await connection.query(
+        `SELECT id FROM exams
+         WHERE subject_id = ? AND LOWER(TRIM(exam_session)) = LOWER(?)
+         LIMIT 1`,
+        [Number(subjectId), cleanSession]
+      );
+      if (dupSession.length > 0) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: "Tên đợt thi đã tồn tại trong môn học này, không được phép tạo trùng!",
+        });
+      }
+    }
+
+    if (!isUpdate && cleanSession) {
+      const [templateRows] = await connection.query(
+        `SELECT e.*,
+                (SELECT COUNT(*) FROM exam_questions eq WHERE eq.exam_id = e.id) AS question_count
+         FROM exams e
+         WHERE e.subject_id = ? AND LOWER(TRIM(e.exam_session)) = LOWER(?)
+         ORDER BY e.id ASC
+         LIMIT 1`,
+        [Number(subjectId), cleanSession]
+      );
+      if (templateRows.length > 0) {
+        if (!cleanShift) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: "Vui lòng nhập tên ca thi khi thêm ca vào đợt thi có sẵn.",
+          });
+        }
+        const [dupShift] = await connection.query(
+          `SELECT id FROM exams
+           WHERE subject_id = ?
+             AND LOWER(TRIM(exam_session)) = LOWER(?)
+             AND LOWER(TRIM(COALESCE(exam_shift, ''))) = LOWER(?)
+           LIMIT 1`,
+          [Number(subjectId), cleanSession, cleanShift]
+        );
+        if (dupShift.length > 0) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: "Ca thi này đã tồn tại trong đợt thi, vui lòng đặt tên ca khác!",
+          });
+        }
+
+        const tpl = templateRows[0];
+        const requiredCount = Number(tpl.question_count);
+        if (questionIds.length !== requiredCount) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Đợt thi "${cleanSession}" yêu cầu chọn đúng ${requiredCount} câu hỏi để đồng bộ với các ca trước.`,
+          });
+        }
+        finalDuration = Number(tpl.duration_minutes);
+        finalPassScore = Number(tpl.pass_score);
+        finalMajorGroup = tpl.major_group;
+        finalShuffleQuestions = tpl.shuffle_questions ? 1 : 0;
+        finalShuffleOptions = tpl.shuffle_options ? 1 : 0;
+        finalAntiCheat = tpl.anti_cheat ? 1 : 0;
+        finalMaxTabSwitches = Number(tpl.max_tab_switches) || 0;
+        finalMaxAttempts = Number(tpl.max_attempts) || 0;
+      }
+    }
+
+    const [questions] = await connection.query(
+      "SELECT id FROM questions WHERE subject_id = ? AND id IN (?) FOR UPDATE",
+      [Number(subjectId), questionIds.map(Number)]
+    );
+    if (questions.length !== questionIds.length) {
+      throw Object.assign(new Error("Tất cả câu hỏi phải tồn tại và thuộc môn học đã chọn."), { statusCode: 400 });
+    }
+
+    const values = [
+      Number(subjectId),
+      title.trim(),
+      description.trim(),
+      finalDuration,
+      finalPassScore,
+      isPublished ? 1 : 0,
+      finalMajorGroup,
+      cleanSession,
+      cleanShift,
+      finalShuffleQuestions,
+      finalShuffleOptions,
+      finalAntiCheat,
+      finalMaxTabSwitches,
+      finalMaxAttempts,
+      resolvedOpenAt,
+      resolvedCloseAt,
+    ];
+    let examId = req.params.id;
+    if (isUpdate) {
+      await connection.query(
+        `UPDATE exams
+         SET subject_id = ?, title = ?, description = ?, duration_minutes = ?, pass_score = ?,
+             is_published = ?, major_group = ?, exam_session = ?, exam_shift = ?,
+             shuffle_questions = ?, shuffle_options = ?, anti_cheat = ?,
+             max_tab_switches = ?, max_attempts = ?, open_at = ?, close_at = ?
+         WHERE id = ?`,
+        [...values, examId]
+      );
+      await connection.query("DELETE FROM exam_questions WHERE exam_id = ?", [examId]);
+    } else {
+      const [result] = await connection.query(
+        `INSERT INTO exams
+          (subject_id, title, description, duration_minutes, pass_score, is_published, major_group,
+           exam_session, exam_shift, shuffle_questions, shuffle_options, anti_cheat,
+           max_tab_switches, max_attempts, open_at, close_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [...values, req.user.id]
+      );
+      examId = result.insertId;
+    }
+    for (const [index, questionId] of questionIds.entries()) {
+      await connection.query(
+        "INSERT INTO exam_questions (exam_id, question_id, order_index) VALUES (?, ?, ?)",
+        [examId, Number(questionId), index + 1]
+      );
+    }
+    await logAdminAction(connection, {
+      user: req.user,
+      actionType: isUpdate ? "UPDATE_EXAM" : "CREATE_EXAM",
+      examTitle: title.trim(),
+      subjectCode,
+      details: isUpdate
+        ? `Cập nhật đề thi (${questionIds.length} câu hỏi, ${Number(durationMinutes)} phút)`
+        : `Thêm đề mới gồm ${questionIds.length} câu hỏi (${Number(durationMinutes)} phút)`,
+    });
+    await connection.commit();
+    return res.status(isUpdate ? 200 : 201).json({
+      success: true,
+      message: isUpdate ? "Cập nhật đề thi thành công!" : "Tạo đề thi thành công!",
+      data: { id: Number(examId) },
+    });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+export async function deleteExam(req, res, next) {
+  try {
+    const { id } = req.params;
+    const [used] = await pool.query("SELECT id FROM submissions WHERE exam_id = ? LIMIT 1", [id]);
+    if (used.length) return res.status(409).json({ success: false, message: "Đề đã có bài nộp nên không thể xóa." });
+
+    const [examInfo] = await pool.query(
+      `SELECT e.title, s.code AS subject_code
+       FROM exams e
+       LEFT JOIN subjects s ON e.subject_id = s.id
+       WHERE e.id = ?`,
+      [id]
+    );
+    const [result] = await pool.query("DELETE FROM exams WHERE id = ?", [id]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy đề thi cần xóa.",
+      });
+    }
+
+    if (examInfo.length > 0) {
+      await logAdminAction(pool, {
+        user: req.user,
+        actionType: "DELETE_EXAM",
+        examTitle: examInfo[0].title,
+        subjectCode: examInfo[0].subject_code || null,
+        details: "Xóa đề thi khỏi hệ thống",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Đã xóa đề thi thành công!",
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function reopenExam(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { closeAt } = req.body || {};
+
+    const [rows] = await pool.query(
+      `SELECT e.id, e.title, e.close_at, s.code AS subject_code
+       FROM exams e
+       LEFT JOIN subjects s ON e.subject_id = s.id
+       WHERE e.id = ?`,
+      [id]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: "Không tìm thấy đề thi." });
+    }
+
+    let nextCloseAt = rows[0].close_at;
+    if (closeAt) {
+      const parsed = new Date(closeAt);
+      if (Number.isNaN(parsed.getTime()) || parsed <= new Date()) {
+        return res.status(400).json({
+          success: false,
+          message: "Thời gian đóng đề mới phải là một mốc trong tương lai.",
+        });
+      }
+      nextCloseAt = parsed;
+    } else if (nextCloseAt && new Date(nextCloseAt) <= new Date()) {
+      nextCloseAt = null;
+    }
+
+    await pool.query(
+      "UPDATE exams SET is_published = 1, close_at = ? WHERE id = ?",
+      [nextCloseAt, id]
+    );
+
+    await logAdminAction(pool, {
+      user: req.user,
+      actionType: "REOPEN_EXAM",
+      examTitle: rows[0].title,
+      subjectCode: rows[0].subject_code || null,
+      details: nextCloseAt
+        ? `Mở lại đề thi đến ${new Date(nextCloseAt).toLocaleString("vi-VN")}`
+        : "Mở lại đề thi đã đóng (mở tự do)",
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: nextCloseAt
+        ? `Đã mở lại đề thi đến ${new Date(nextCloseAt).toLocaleString("vi-VN")}!`
+        : "Đã mở lại đề thi thành công (mở tự do)!",
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getAdminLogs(req, res, next) {
+  try {
+    const [rows] = await pool.query(
+      "SELECT * FROM admin_logs ORDER BY created_at DESC, id DESC LIMIT 100"
+    );
+    return res.status(200).json({
+      success: true,
+      data: rows,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getAdminExamOverview(req, res, next) {
+  try {
+    const [rows] = await pool.query(`
+      SELECT
+        e.*,
+        s.name AS subject_name,
+        s.code AS subject_code,
+        (SELECT COUNT(*) FROM exam_questions eq WHERE eq.exam_id = e.id) AS question_count,
+        (SELECT GROUP_CONCAT(eq.question_id ORDER BY eq.order_index ASC) FROM exam_questions eq WHERE eq.exam_id = e.id) AS question_ids_csv,
+        (SELECT COUNT(*) FROM submissions sub WHERE sub.exam_id = e.id) AS completed_count,
+        (SELECT COUNT(*) FROM exam_attempts ea WHERE ea.exam_id = e.id AND ea.status = 'IN_PROGRESS' AND ea.started_at >= DATE_SUB(NOW(), INTERVAL (e.duration_minutes + 5) MINUTE)) AS in_progress_count
+      FROM exams e
+      INNER JOIN subjects s ON e.subject_id = s.id
+      ORDER BY e.id DESC
+    `);
+
+    const now = new Date();
+    const alwaysOpen = [];
+    const inProgressWindow = [];
+    const closed = [];
+
+    for (const rawExam of rows) {
+      const { question_ids_csv, ...rest } = rawExam;
+      const exam = {
+        ...rest,
+        question_ids: question_ids_csv
+          ? String(question_ids_csv)
+              .split(",")
+              .map(Number)
+              .filter(Boolean)
+          : [],
+      };
+      const openAt = exam.open_at ? new Date(exam.open_at) : null;
+      const closeAt = exam.close_at ? new Date(exam.close_at) : null;
+      const isPublished = Boolean(exam.is_published);
+
+      if (!isPublished || (closeAt && closeAt < now)) {
+        closed.push(exam);
+      } else if (!openAt && !closeAt) {
+        alwaysOpen.push(exam);
+      } else {
+        inProgressWindow.push(exam);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        alwaysOpen,
+        inProgressWindow,
+        closed,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getExamLeaderboard(req, res, next) {
+  try {
+    const { id } = req.params;
+    const [examRows] = await pool.query(
+      `SELECT e.*, s.name AS subject_name, s.code AS subject_code
+       FROM exams e
+       INNER JOIN subjects s ON e.subject_id = s.id
+       WHERE e.id = ?`,
+      [id]
+    );
+
+    if (!examRows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy đề thi.",
+      });
+    }
+    const exam = examRows[0];
+
+    const [subRows] = await pool.query(
+      `SELECT
+         sub.id AS submission_id,
+         sub.student_id,
+         sub.score,
+         sub.correct_count,
+         sub.total_questions,
+         sub.time_spent_seconds,
+         sub.started_at,
+         sub.submitted_at,
+         sub.tab_switch_count,
+         sub.is_suspended,
+         sub.suspend_reason,
+         u.full_name,
+         u.student_code,
+         u.major_group
+       FROM submissions sub
+       INNER JOIN users u ON sub.student_id = u.id
+       WHERE sub.exam_id = ?
+       ORDER BY
+         sub.score DESC,
+         sub.time_spent_seconds ASC,
+         sub.submitted_at ASC,
+         sub.tab_switch_count ASC,
+         u.student_code ASC`,
+      [id]
+    );
+
+    const tieKey = (row) =>
+      [
+        Number(row.score).toFixed(2),
+        Number(row.time_spent_seconds) || 0,
+        row.submitted_at ? Math.floor(new Date(row.submitted_at).getTime() / 1000) : 0,
+        Number(row.tab_switch_count) || 0,
+      ].join("|");
+
+    const keyCounts = new Map();
+    for (const row of subRows) {
+      const k = tieKey(row);
+      keyCounts.set(k, (keyCounts.get(k) || 0) + 1);
+    }
+
+    let currentRank = 0;
+    let prevKey = null;
+    const leaderboard = subRows.map((row, idx) => {
+      const k = tieKey(row);
+      if (k !== prevKey) {
+        currentRank = idx + 1;
+        prevKey = k;
+      }
+      return {
+        ...row,
+        rank: currentRank,
+        is_tied: (keyCounts.get(k) || 0) > 1,
+      };
+    });
+
+    const [inProgressRows] = await pool.query(
+      `SELECT
+         ea.id,
+         ea.user_id,
+         ea.started_at,
+         u.full_name,
+         u.student_code,
+         u.major_group
+       FROM exam_attempts ea
+       INNER JOIN users u ON ea.user_id = u.id
+       WHERE ea.exam_id = ?
+         AND ea.status = 'IN_PROGRESS'
+         AND ea.started_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+       ORDER BY ea.started_at ASC`,
+      [id, (Number(exam.duration_minutes) || 30) + 5]
+    );
+
+    const completedCount = leaderboard.length;
+    const passScore = Number(exam.pass_score ?? 5);
+    const passedCount = leaderboard.filter((r) => Number(r.score) >= passScore).length;
+    const avgScore =
+      completedCount > 0
+        ? Number(
+            (
+              leaderboard.reduce((sum, r) => sum + Number(r.score), 0) / completedCount
+            ).toFixed(2)
+          )
+        : 0;
+    const passRate =
+      completedCount > 0 ? Math.round((passedCount / completedCount) * 100) : 0;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        exam,
+        stats: {
+          inProgressCount: inProgressRows.length,
+          completedCount,
+          avgScore,
+          passRate,
+        },
+        leaderboard,
+        inProgress: inProgressRows,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}

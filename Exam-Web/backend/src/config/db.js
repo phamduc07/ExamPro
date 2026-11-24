@@ -1,0 +1,702 @@
+import mysql from "mysql2/promise";
+import bcrypt from "bcryptjs";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const dbConfig = {
+  host: process.env.DB_HOST || "localhost",
+  port: Number(process.env.DB_PORT) || 3306,
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD ?? "",
+  charset: "utf8mb4",
+  ssl: process.env.DB_HOST && process.env.DB_HOST !== "localhost" ? { minVersion: "TLSv1.2", rejectUnauthorized: true } : undefined,
+};
+
+const dbName = process.env.DB_NAME || "ptit_online_exam";
+
+export const pool = mysql.createPool({
+  ...dbConfig,
+  database: dbName,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
+
+export async function initializeDatabase() {
+
+  const tempConn = await mysql.createConnection(dbConfig);
+  await tempConn.query(
+    `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`
+  );
+  await tempConn.end();
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      full_name VARCHAR(120) NOT NULL,
+      email VARCHAR(150) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      role VARCHAR(30) NOT NULL DEFAULT 'STUDENT',
+      student_code VARCHAR(30) DEFAULT NULL UNIQUE,
+      major_group ENUM('KY_THUAT', 'KINH_TE') DEFAULT NULL,
+      is_super_admin TINYINT(1) NOT NULL DEFAULT 0,
+      must_change_password TINYINT(1) NOT NULL DEFAULT 0,
+      token_version INT NOT NULL DEFAULT 1,
+      failed_login_attempts INT NOT NULL DEFAULT 0,
+      locked_until DATETIME DEFAULT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS subjects (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      code VARCHAR(30) NOT NULL UNIQUE,
+      name VARCHAR(150) NOT NULL,
+      description TEXT,
+      created_by INT DEFAULT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_subject_teacher FOREIGN KEY (created_by)
+        REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS questions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      subject_id INT NOT NULL,
+      content TEXT NOT NULL,
+      option_a TEXT NOT NULL,
+      option_b TEXT NOT NULL,
+      option_c TEXT NOT NULL,
+      option_d TEXT NOT NULL,
+      correct_answer ENUM('A', 'B', 'C', 'D') NOT NULL,
+      difficulty ENUM('EASY', 'MEDIUM', 'HARD') NOT NULL DEFAULT 'MEDIUM',
+      explanation TEXT,
+      created_by INT DEFAULT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_question_subject FOREIGN KEY (subject_id)
+        REFERENCES subjects(id) ON DELETE CASCADE,
+      CONSTRAINT fk_question_teacher FOREIGN KEY (created_by)
+        REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS exams (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      subject_id INT NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      description TEXT,
+      duration_minutes INT NOT NULL DEFAULT 30,
+      pass_score DECIMAL(4,2) NOT NULL DEFAULT 5.00,
+      is_published TINYINT(1) NOT NULL DEFAULT 1,
+      major_group ENUM('ALL', 'KY_THUAT', 'KINH_TE') NOT NULL DEFAULT 'ALL',
+      exam_session VARCHAR(150) DEFAULT NULL,
+      exam_shift VARCHAR(100) DEFAULT NULL,
+      shuffle_questions TINYINT(1) NOT NULL DEFAULT 0,
+      shuffle_options TINYINT(1) NOT NULL DEFAULT 0,
+      anti_cheat TINYINT(1) NOT NULL DEFAULT 0,
+      max_tab_switches INT NOT NULL DEFAULT 0,
+      max_attempts INT NOT NULL DEFAULT 0,
+      open_at DATETIME DEFAULT NULL,
+      close_at DATETIME DEFAULT NULL,
+      created_by INT DEFAULT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT fk_exam_subject FOREIGN KEY (subject_id)
+        REFERENCES subjects(id) ON DELETE CASCADE,
+      CONSTRAINT fk_exam_teacher FOREIGN KEY (created_by)
+        REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS exam_questions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      exam_id INT NOT NULL,
+      question_id INT NOT NULL,
+      order_index INT NOT NULL DEFAULT 1,
+      UNIQUE KEY uq_exam_question (exam_id, question_id),
+      CONSTRAINT fk_eq_exam FOREIGN KEY (exam_id)
+        REFERENCES exams(id) ON DELETE CASCADE,
+      CONSTRAINT fk_eq_question FOREIGN KEY (question_id)
+        REFERENCES questions(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS submissions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      exam_id INT NOT NULL,
+      student_id INT NOT NULL,
+      score DECIMAL(4,2) NOT NULL DEFAULT 0.00,
+      correct_count INT NOT NULL DEFAULT 0,
+      total_questions INT NOT NULL DEFAULT 0,
+      time_spent_seconds INT NOT NULL DEFAULT 0,
+      started_at DATETIME DEFAULT NULL,
+      tab_switch_count INT NOT NULL DEFAULT 0,
+      is_suspended TINYINT(1) NOT NULL DEFAULT 0,
+      suspend_reason VARCHAR(255) DEFAULT NULL,
+      answers_json JSON NOT NULL,
+      submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_sub_exam FOREIGN KEY (exam_id)
+        REFERENCES exams(id) ON DELETE CASCADE,
+      CONSTRAINT fk_sub_student FOREIGN KEY (student_id)
+        REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_otps (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(150) NOT NULL UNIQUE,
+      otp_hash VARCHAR(255) NOT NULL,
+      expires_at DATETIME NOT NULL,
+      attempts INT NOT NULL DEFAULT 0,
+      last_sent_at DATETIME NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS login_otps (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL UNIQUE,
+      email VARCHAR(150) NOT NULL,
+      otp_hash VARCHAR(255) NOT NULL,
+      expires_at DATETIME NOT NULL,
+      attempts INT NOT NULL DEFAULT 0,
+      last_sent_at DATETIME NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_login_otp_user FOREIGN KEY (user_id)
+        REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS exam_attempts (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      exam_id INT NOT NULL,
+      user_id INT NOT NULL,
+      started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      status ENUM('IN_PROGRESS', 'COMPLETED') NOT NULL DEFAULT 'IN_PROGRESS',
+      is_suspended TINYINT(1) NOT NULL DEFAULT 0,
+      suspend_reason VARCHAR(255) DEFAULT NULL,
+      UNIQUE KEY uq_exam_attempt (exam_id, user_id),
+      CONSTRAINT fk_attempt_exam FOREIGN KEY (exam_id)
+        REFERENCES exams(id) ON DELETE CASCADE,
+      CONSTRAINT fk_attempt_user FOREIGN KEY (user_id)
+        REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS admin_logs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      admin_id INT DEFAULT NULL,
+      admin_name VARCHAR(100) NOT NULL,
+      action_type VARCHAR(50) NOT NULL,
+      exam_title VARCHAR(255) NOT NULL,
+      subject_code VARCHAR(50) DEFAULT NULL,
+      details TEXT DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS password_resets (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(150) NOT NULL,
+      otp_code VARCHAR(255) NOT NULL,
+      expires_at DATETIME NOT NULL,
+      failed_attempts INT NOT NULL DEFAULT 0,
+      used TINYINT(1) NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB;
+  `);
+
+  await ensureSchemaColumns();
+
+  const adminEmail = (process.env.ADMIN_EMAIL || "teacher@ptit.edu.vn").trim().toLowerCase();
+  const adminPassword = process.env.ADMIN_PASSWORD || "123456";
+
+  const [userCountRows] = await pool.query("SELECT COUNT(*) AS cnt FROM users");
+  if (userCountRows[0].cnt === 0) {
+    console.log("🌱 Đang khởi tạo dữ liệu mẫu PTIT vào MySQL...");
+    const teacherPass = await bcrypt.hash(adminPassword, 10);
+    const studentPass = await bcrypt.hash("123456", 10);
+
+    const [teacherRes] = await pool.query(
+      `INSERT INTO users (full_name, email, password_hash, role, student_code)
+       VALUES (?, ?, ?, 'TEACHER', 'GV001')`,
+      ["Quản trị viên PTIT", adminEmail, teacherPass]
+    );
+    const teacherId = teacherRes.insertId;
+
+    const [studentRes] = await pool.query(
+      `INSERT INTO users (full_name, email, password_hash, role, student_code, major_group)
+       VALUES (?, ?, ?, 'STUDENT', 'B22DCCN001', 'KY_THUAT')`,
+      ["Trần Minh Quân", "student@ptit.edu.vn", studentPass]
+    );
+    const studentId = studentRes.insertId;
+
+    await pool.query(
+      `INSERT INTO users (full_name, email, password_hash, role, student_code, major_group)
+       VALUES (?, ?, ?, 'STUDENT', 'B22DCCN102', 'KY_THUAT')`,
+      ["Lê Thị Hương Giang", "giang.lth@ptit.edu.vn", studentPass]
+    );
+
+    const subjectsData = [
+      [
+        "INT1434",
+        "Lập trình Web",
+        "Học phần phát triển ứng dụng Web Fullstack với ReactJS, Node.js, Express và CSDL quan hệ.",
+        teacherId,
+      ],
+      [
+        "INT1313",
+        "Cơ sở dữ liệu",
+        "Mô hình dữ liệu quan hệ, đại số quan hệ, ngôn ngữ truy vấn SQL và chuẩn hóa cơ sở dữ liệu.",
+        teacherId,
+      ],
+      [
+        "INT1336",
+        "Mạng máy tính",
+        "Kiến trúc phân tầng OSI, TCP/IP, định tuyến IP, DNS, HTTP và an toàn mạng căn bản.",
+        teacherId,
+      ],
+      [
+        "INT1306",
+        "Cấu trúc dữ liệu & Giải thuật",
+        "Danh sách liên kết, ngăn xếp, hàng đợi, cây nhị phân, đồ thị và các thuật toán sắp xếp, tìm kiếm.",
+        teacherId,
+      ],
+    ];
+
+    const subjectIds = [];
+    for (const s of subjectsData) {
+      const [res] = await pool.query(
+        `INSERT INTO subjects (code, name, description, created_by) VALUES (?, ?, ?, ?)`,
+        s
+      );
+      subjectIds.push(res.insertId);
+    }
+
+    const [webId, dbId, netId, dsaId] = subjectIds;
+
+    const questionsData = [
+
+      [
+        webId,
+        "Trong React Router v6, component nào được dùng làm vùng giữ chỗ (placeholder) để hiển thị các route con trong Layout?",
+        "<Switch />",
+        "<Outlet />",
+        "<RouterView />",
+        "<ChildRoute />",
+        "B",
+        "EASY",
+        "<Outlet /> được đặt trong component cha (như MainLayout) để render bất kỳ route con nào khớp với URL hiện tại.",
+        teacherId,
+      ],
+      [
+        webId,
+        "Hook nào trong React được sử dụng để truy cập trực tiếp giá trị từ một Context đã khởi tạo?",
+        "useState",
+        "useEffect",
+        "useContext",
+        "useReducer",
+        "C",
+        "EASY",
+        "useContext(MyContext) nhận vào đối tượng Context và trả về giá trị hiện tại được truyền từ Provider gần nhất.",
+        teacherId,
+      ],
+      [
+        webId,
+        "Trong kiến trúc RESTful API với Express, mã trạng thái HTTP nào biểu thị yêu cầu tạo mới tài nguyên (POST) đã thành công?",
+        "200 OK",
+        "201 Created",
+        "204 No Content",
+        "400 Bad Request",
+        "B",
+        "EASY",
+        "Mã 201 Created là chuẩn RESTful trả về khi một bản ghi mới vừa được khởi tạo thành công trên server.",
+        teacherId,
+      ],
+      [
+        webId,
+        "Khi xác thực bằng JWT (JSON Web Token), client thường gửi token kèm theo mỗi request ở header nào?",
+        "Authorization: Bearer <token>",
+        "Set-Cookie: jwt=<token>",
+        "X-Powered-By: <token>",
+        "Content-Type: application/jwt",
+        "A",
+        "MEDIUM",
+        "Chuẩn phổ biến nhất cho JWT là gửi trong HTTP Header 'Authorization' theo cú pháp 'Bearer <token>'.",
+        teacherId,
+      ],
+      [
+        webId,
+        "Ưu điểm lớn nhất của thư viện quản lý state Zustand so với Redux truyền thống là gì?",
+        "Bắt buộc phải bọc toàn bộ ứng dụng trong nhiều Provider lồng nhau",
+        "Cấu hình gọn nhẹ, không cần boilerplate (actions/reducers phức tạp), hỗ trợ selector tránh re-render thừa",
+        "Chỉ hoạt động trên trình duyệt Safari",
+        "Tự động thay thế hoàn toàn cơ sở dữ liệu MySQL",
+        "B",
+        "MEDIUM",
+        "Zustand sử dụng hook-based store cực kỳ ngắn gọn, không cần Context Provider bọc ngoài và tối ưu re-render nhờ cơ chế selector.",
+        teacherId,
+      ],
+      [
+        webId,
+        "Hàm middleware xử lý lỗi tập trung (Error-handling middleware) trong Express.js bắt buộc phải khai báo đủ bao nhiêu tham số?",
+        "2 tham số: (req, res)",
+        "3 tham số: (req, res, next)",
+        "4 tham số: (err, req, res, next)",
+        "1 tham số: (err)",
+        "C",
+        "HARD",
+        "Express nhận diện error middleware thông qua chữ ký hàm có đúng 4 tham số (err, req, res, next).",
+        teacherId,
+      ],
+
+      [
+        dbId,
+        "Trong MySQL, câu lệnh nào dùng để lấy các bản ghi từ hai bảng khi có sự khớp nhau ở trường khóa ngoại?",
+        "INNER JOIN",
+        "DROP TABLE",
+        "ALTER VIEW",
+        "TRUNCATE",
+        "A",
+        "EASY",
+        "INNER JOIN trả về các hàng khi có ít nhất một giá trị khớp ở cả hai bảng liên kết.",
+        teacherId,
+      ],
+      [
+        dbId,
+        "Để biểu diễn mối quan hệ nhiều - nhiều (N - N) giữa bảng Đề thi (exams) và Câu hỏi (questions) trong MySQL, cách thiết kế chuẩn là gì?",
+        "Lưu mảng ID câu hỏi dạng chuỗi phân cách dấu phẩy trong bảng exams",
+        "Tạo một bảng trung gian (ví dụ: exam_questions) chứa hai khóa ngoại trỏ tới exams.id và questions.id",
+        "Gộp hai bảng exams và questions thành một bảng duy nhất",
+        "Không thể biểu diễn quan hệ N-N trong MySQL",
+        "B",
+        "MEDIUM",
+        "Chuẩn hóa CSDL quan hệ (3NF) yêu cầu tách quan hệ N-N thành bảng trung gian với 2 khóa ngoại.",
+        teacherId,
+      ],
+      [
+        dbId,
+        "Mệnh đề nào trong SQL được dùng để lọc kết quả SAU KHI đã gom nhóm bằng GROUP BY?",
+        "WHERE",
+        "ORDER BY",
+        "HAVING",
+        "LIMIT",
+        "C",
+        "MEDIUM",
+        "WHERE lọc các dòng trước khi nhóm, còn HAVING lọc các nhóm sau khi đã thực hiện GROUP BY và hàm tổng hợp (COUNT, AVG, SUM).",
+        teacherId,
+      ],
+      [
+        dbId,
+        "Ràng buộc khóa ngoại `ON DELETE CASCADE` trong MySQL có ý nghĩa gì?",
+        "Cấm xóa bản ghi ở bảng cha trong mọi trường hợp",
+        "Khi xóa bản ghi ở bảng cha, các bản ghi con tham chiếu tới nó sẽ tự động được xóa theo",
+        "Tự động nhân đôi bản ghi con khi xóa bản ghi cha",
+        "Đổi giá trị khóa ngoại thành số âm",
+        "B",
+        "HARD",
+        "ON DELETE CASCADE giúp đảm bảo toàn vẹn tham chiếu bằng cách tự động xóa các bản ghi phụ thuộc ở bảng con.",
+        teacherId,
+      ],
+
+      [
+        netId,
+        "Giao thức HTTP/HTTPS hoạt động ở tầng nào trong mô hình TCP/IP?",
+        "Tầng Ứng dụng (Application Layer)",
+        "Tầng Giao vận (Transport Layer)",
+        "Tầng Mạng (Network Layer)",
+        "Tầng Vật lý (Physical Layer)",
+        "A",
+        "EASY",
+        "HTTP, DNS, FTP, SMTP đều là các giao thức thuộc tầng Ứng dụng (Application Layer).",
+        teacherId,
+      ],
+      [
+        netId,
+        "Cổng (Port) mặc định của dịch vụ cơ sở dữ liệu MySQL là bao nhiêu?",
+        "80",
+        "443",
+        "3306",
+        "27017",
+        "C",
+        "EASY",
+        "MySQL mặc định lắng nghe trên cổng 3306 (trong khi 80 là HTTP, 443 là HTTPS, 27017 là MongoDB).",
+        teacherId,
+      ],
+      [
+        netId,
+        "Giao thức nào đảm nhiệm việc phân giải tên miền (Domain Name) thành địa chỉ IP?",
+        "DHCP",
+        "DNS",
+        "ICMP",
+        "ARP",
+        "B",
+        "MEDIUM",
+        "DNS (Domain Name System) là hệ thống phân giải tên miền thành địa chỉ IP tương ứng.",
+        teacherId,
+      ],
+
+      [
+        dsaId,
+        "Độ phức tạp thời gian trung bình của thuật toán Tìm kiếm nhị phân (Binary Search) trên mảng đã sắp xếp có n phần tử là bao nhiêu?",
+        "O(n)",
+        "O(log n)",
+        "O(n log n)",
+        "O(n^2)",
+        "B",
+        "EASY",
+        "Mỗi bước Binary Search chia đôi không gian tìm kiếm nên độ phức tạp thời gian là O(log n).",
+        teacherId,
+      ],
+      [
+        dsaId,
+        "Cấu trúc dữ liệu Ngăn xếp (Stack) hoạt động theo nguyên tắc nào?",
+        "FIFO (First In - First Out)",
+        "LIFO (Last In - First Out)",
+        "Random Access",
+        "Priority Queue",
+        "B",
+        "EASY",
+        "Stack hoạt động theo cơ chế Vào sau - Ra trước (LIFO: Last In, First Out).",
+        teacherId,
+      ],
+    ];
+
+    const insertedQuestionIds = [];
+    for (const q of questionsData) {
+      const [res] = await pool.query(
+        `INSERT INTO questions
+          (subject_id, content, option_a, option_b, option_c, option_d, correct_answer, difficulty, explanation, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        q
+      );
+      insertedQuestionIds.push({ id: res.insertId, subjectId: q[0] });
+    }
+
+    const examsData = [
+      [
+        webId,
+        "Đề thi Cuối kỳ: Lập trình Web Fullstack (React + Express + MySQL)",
+        "Đánh giá toàn diện kiến thức về React Router v6, Context API, Zustand, RESTful API với Express và bảo mật JWT.",
+        25,
+        5.0,
+        1,
+        teacherId,
+      ],
+      [
+        dbId,
+        "Đề kiểm tra Giữa kỳ: Hệ quản trị CSDL MySQL & Thiết kế Quan hệ",
+        "Kiểm tra kỹ năng truy vấn JOIN, GROUP BY, HAVING, thiết kế khóa ngoại và chuẩn hóa cơ sở dữ liệu.",
+        20,
+        5.0,
+        1,
+        teacherId,
+      ],
+      [
+        netId,
+        "Đề ôn tập: Kiến trúc Mạng máy tính & Giao thức TCP/IP",
+        "Tổng hợp các câu hỏi trắc nghiệm trọng tâm về mô hình OSI, TCP/IP, DNS, HTTP và cổng dịch vụ.",
+        15,
+        5.0,
+        1,
+        teacherId,
+      ],
+      [
+        dsaId,
+        "Đề luyện tập nhanh: Cấu trúc dữ liệu & Giải thuật căn bản",
+        "Ôn tập độ phức tạp thuật toán, tìm kiếm nhị phân, ngăn xếp và hàng đợi.",
+        15,
+        5.0,
+        1,
+        teacherId,
+      ],
+    ];
+
+    const examIds = [];
+    for (const ex of examsData) {
+      const [res] = await pool.query(
+        `INSERT INTO exams (subject_id, title, description, duration_minutes, pass_score, is_published, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ex
+      );
+      examIds.push({ examId: res.insertId, subjectId: ex[0] });
+    }
+
+    for (const ex of examIds) {
+      const matchingQuestions = insertedQuestionIds.filter(
+        (q) => q.subjectId === ex.subjectId
+      );
+      let order = 1;
+      for (const mq of matchingQuestions) {
+        await pool.query(
+          `INSERT INTO exam_questions (exam_id, question_id, order_index) VALUES (?, ?, ?)`,
+          [ex.examId, mq.id, order++]
+        );
+      }
+    }
+
+    const webQuestions = insertedQuestionIds.filter((q) => q.subjectId === webId);
+    const sampleAnswers = {};
+    webQuestions.forEach((wq, idx) => {
+
+      const correctKeys = ["B", "C", "B", "A", "B", "A"];
+      sampleAnswers[wq.id] = correctKeys[idx] || "A";
+    });
+
+    await pool.query(
+      `INSERT INTO submissions (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, answers_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        examIds[0].examId,
+        studentId,
+        8.33,
+        5,
+        6,
+        420,
+        JSON.stringify(sampleAnswers),
+      ]
+    );
+
+    console.log("✅ Khởi tạo CSDL MySQL và dữ liệu mẫu PTIT hoàn tất!");
+  }
+
+  await syncExclusiveAdmin(adminEmail, adminPassword);
+}
+
+async function ensureSchemaColumns() {
+  const safeAlter = async (sql) => {
+    try {
+      await pool.query(sql);
+    } catch (err) {
+      if (!["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME"].includes(err.code)) {
+        throw err;
+      }
+    }
+  };
+
+  await safeAlter(
+    "ALTER TABLE users MODIFY COLUMN role VARCHAR(30) NOT NULL DEFAULT 'STUDENT'"
+  );
+  await safeAlter(
+    "ALTER TABLE users ADD COLUMN major_group ENUM('KY_THUAT', 'KINH_TE') DEFAULT NULL AFTER student_code"
+  );
+  await safeAlter(
+    "ALTER TABLE users ADD COLUMN is_super_admin TINYINT(1) NOT NULL DEFAULT 0 AFTER major_group"
+  );
+  await safeAlter(
+    "ALTER TABLE users ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0 AFTER is_super_admin"
+  );
+  await safeAlter(
+    "ALTER TABLE users ADD COLUMN token_version INT NOT NULL DEFAULT 1 AFTER major_group"
+  );
+  await safeAlter(
+    "ALTER TABLE users ADD COLUMN failed_login_attempts INT NOT NULL DEFAULT 0 AFTER token_version"
+  );
+  await safeAlter(
+    "ALTER TABLE users ADD COLUMN locked_until DATETIME DEFAULT NULL AFTER failed_login_attempts"
+  );
+  await safeAlter("ALTER TABLE users ADD UNIQUE KEY uq_users_student_code (student_code)");
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN major_group ENUM('ALL', 'KY_THUAT', 'KINH_TE') NOT NULL DEFAULT 'ALL' AFTER is_published"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN exam_session VARCHAR(150) DEFAULT NULL AFTER major_group"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN exam_shift VARCHAR(100) DEFAULT NULL AFTER exam_session"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN shuffle_questions TINYINT(1) NOT NULL DEFAULT 0 AFTER major_group"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN shuffle_options TINYINT(1) NOT NULL DEFAULT 0 AFTER shuffle_questions"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN anti_cheat TINYINT(1) NOT NULL DEFAULT 0 AFTER shuffle_options"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN max_tab_switches INT NOT NULL DEFAULT 0 AFTER anti_cheat"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN max_attempts INT NOT NULL DEFAULT 0 AFTER max_tab_switches"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN open_at DATETIME DEFAULT NULL AFTER max_attempts"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN close_at DATETIME DEFAULT NULL AFTER open_at"
+  );
+  await safeAlter(
+    "ALTER TABLE exams ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at"
+  );
+  await safeAlter(
+    "ALTER TABLE submissions ADD COLUMN started_at DATETIME DEFAULT NULL AFTER time_spent_seconds"
+  );
+  await safeAlter(
+    "ALTER TABLE submissions ADD COLUMN tab_switch_count INT NOT NULL DEFAULT 0 AFTER started_at"
+  );
+  await safeAlter(
+    "ALTER TABLE submissions ADD COLUMN is_suspended TINYINT(1) NOT NULL DEFAULT 0 AFTER tab_switch_count"
+  );
+  await safeAlter(
+    "ALTER TABLE submissions ADD COLUMN suspend_reason VARCHAR(255) DEFAULT NULL AFTER is_suspended"
+  );
+  await safeAlter(
+    "ALTER TABLE exam_attempts ADD COLUMN is_suspended TINYINT(1) NOT NULL DEFAULT 0 AFTER status"
+  );
+  await safeAlter(
+    "ALTER TABLE exam_attempts ADD COLUMN suspend_reason VARCHAR(255) DEFAULT NULL AFTER is_suspended"
+  );
+  await safeAlter(
+    "ALTER TABLE password_resets ADD COLUMN failed_attempts INT NOT NULL DEFAULT 0 AFTER expires_at"
+  );
+  await safeAlter(
+    "ALTER TABLE admin_logs MODIFY COLUMN action_type VARCHAR(50) NOT NULL"
+  );
+}
+
+async function syncExclusiveAdmin(adminEmail, adminPassword) {
+  const [targetRows] = await pool.query("SELECT * FROM users WHERE email = ?", [adminEmail]);
+  let adminId;
+
+  if (targetRows.length > 0) {
+    const target = targetRows[0];
+    adminId = target.id;
+    if (target.role !== "TEACHER" || Number(target.is_super_admin) !== 1) {
+      await pool.query(
+        "UPDATE users SET role = 'TEACHER', is_super_admin = 1, student_code = COALESCE(student_code, 'GV001') WHERE id = ?",
+        [adminId]
+      );
+    }
+  } else {
+    const [existingTeachers] = await pool.query(
+      "SELECT * FROM users WHERE role = 'TEACHER' ORDER BY id ASC LIMIT 1"
+    );
+    if (existingTeachers.length > 0) {
+      adminId = existingTeachers[0].id;
+      await pool.query(
+        "UPDATE users SET email = ?, is_super_admin = 1, student_code = COALESCE(student_code, 'GV001') WHERE id = ?",
+        [adminEmail, adminId]
+      );
+    } else {
+      const adminHash = await bcrypt.hash(adminPassword, 10);
+      const [inserted] = await pool.query(
+        `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, student_code)
+         VALUES (?, ?, ?, 'TEACHER', 1, 'GV001')`,
+        ["Quản trị viên PTIT", adminEmail, adminHash]
+      );
+      adminId = inserted.insertId;
+    }
+  }
+}
