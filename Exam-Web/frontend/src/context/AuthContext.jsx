@@ -4,6 +4,26 @@ import { useExamStore } from "../store/useExamStore";
 
 const AuthContext = createContext(null);
 
+function decodeValidJwtPayload(rawToken) {
+  try {
+    const parts = String(rawToken || "").split(".");
+    if (parts.length !== 3) return null;
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+    const json = decodeURIComponent(
+      Array.from(atob(padded))
+        .map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`)
+        .join("")
+    );
+    const payload = JSON.parse(json);
+    if (!payload?.id || payload.purpose) return null;
+    if (payload.exp && payload.exp * 1000 <= Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -20,9 +40,20 @@ export function AuthProvider({ children }) {
       .then((res) => {
         setUser(res.data.data);
       })
-      .catch(() => {
-        localStorage.removeItem("ptit_exam_token");
-        setUser(null);
+      .catch((err) => {
+        const status = err?.response?.status;
+        if (status === 401 || status === 403 || status === 404) {
+          localStorage.removeItem("ptit_exam_token");
+          setUser(null);
+          return;
+        }
+        const fallbackUser = decodeValidJwtPayload(token);
+        if (fallbackUser) {
+          setUser(fallbackUser);
+        } else {
+          localStorage.removeItem("ptit_exam_token");
+          setUser(null);
+        }
       })
       .finally(() => {
         setLoading(false);

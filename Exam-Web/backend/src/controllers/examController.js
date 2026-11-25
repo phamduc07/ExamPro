@@ -82,15 +82,24 @@ export async function getExams(req, res, next) {
     sql += " ORDER BY e.id DESC";
 
     const [rows] = await pool.query(sql, params);
-    const formatted = rows.map(({ question_ids_csv, ...rest }) => ({
-      ...rest,
-      question_ids: question_ids_csv
-        ? String(question_ids_csv)
-            .split(",")
-            .map(Number)
-            .filter(Boolean)
-        : [],
-    }));
+    const formatted = rows.map(({ question_ids_csv, ...rest }) => {
+      const antiCheatEnabled = Boolean(Number(rest.anti_cheat));
+      return {
+        ...rest,
+        anti_cheat: antiCheatEnabled ? 1 : 0,
+        max_tab_switches: antiCheatEnabled
+          ? Number(rest.max_tab_switches) >= 1
+            ? Number(rest.max_tab_switches)
+            : 3
+          : null,
+        question_ids: question_ids_csv
+          ? String(question_ids_csv)
+              .split(",")
+              .map(Number)
+              .filter(Boolean)
+          : [],
+      };
+    });
     return res.status(200).json({
       success: true,
       data: formatted,
@@ -128,6 +137,13 @@ export async function getExamById(req, res, next) {
     }
 
     const exam = examRows[0];
+    const isAntiCheatExam = Boolean(Number(exam.anti_cheat));
+    exam.anti_cheat = isAntiCheatExam ? 1 : 0;
+    exam.max_tab_switches = isAntiCheatExam
+      ? Number(exam.max_tab_switches) >= 1
+        ? Number(exam.max_tab_switches)
+        : 3
+      : null;
     const hasMaxAttempts = Number(exam.max_attempts) >= 1;
 
     if (req.user.role === "STUDENT") {
@@ -161,13 +177,31 @@ export async function getExamById(req, res, next) {
       );
 
       if (existingAttempt.length > 0 && Number(existingAttempt[0].is_suspended) === 1) {
-        const reason = existingAttempt[0].suspend_reason || "Vi phạm quy chế phòng thi";
-        return res.status(403).json({
-          success: false,
-          isSuspended: true,
-          suspendReason: reason,
-          message: `Bài thi của bạn đã bị Giám thị đình chỉ (0 điểm). Lý do: ${reason}`,
-        });
+        if (
+          !isAntiCheatExam &&
+          String(existingAttempt[0].suspend_reason || "").startsWith("Vượt quá giới hạn rời tab")
+        ) {
+          await pool.query(
+            `UPDATE exam_attempts
+             SET is_suspended = 0,
+                 suspend_reason = NULL,
+                 tab_switch_count = 0,
+                 last_violation_at = NULL,
+                 last_violation_reason = NULL
+             WHERE exam_id = ? AND user_id = ?`,
+            [id, req.user.id]
+          );
+          existingAttempt[0].is_suspended = 0;
+          existingAttempt[0].suspend_reason = null;
+        } else {
+          const reason = existingAttempt[0].suspend_reason || "Vi phạm quy chế phòng thi";
+          return res.status(403).json({
+            success: false,
+            isSuspended: true,
+            suspendReason: reason,
+            message: `Bài thi của bạn đã bị Giám thị đình chỉ (0 điểm). Lý do: ${reason}`,
+          });
+        }
       }
 
       if (
@@ -309,7 +343,9 @@ export async function getExamById(req, res, next) {
         "SELECT started_at, tab_switch_count FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
         [id, req.user.id]
       );
-      currentTabSwitchCount = Math.max(0, Number(activeAttempt[0]?.tab_switch_count) || 0);
+      currentTabSwitchCount = isAntiCheatExam
+        ? Math.max(0, Number(activeAttempt[0]?.tab_switch_count) || 0)
+        : 0;
       if (activeAttempt[0]?.started_at) {
         activeStartedAt = new Date(activeAttempt[0].started_at).toISOString();
       }
@@ -373,9 +409,11 @@ async function saveExam(req, res, next, isUpdate) {
       questionIds,
     } = req.body;
 
-    const parseOptionalLimit = (val) => {
-      if (val === null || val === undefined || val === "") return null;
-      return Number(val);
+    const resolveMaxTabSwitches = (antiCheatFlag, val) => {
+      if (!antiCheatFlag) return null;
+      if (val === null || val === undefined || val === "") return 3;
+      const num = Number(val);
+      return Number.isInteger(num) && num >= 1 ? num : 3;
     };
 
     const parseOptionalAttempts = (val) => {
@@ -431,7 +469,7 @@ async function saveExam(req, res, next, isUpdate) {
           shuffleQuestions ? 1 : 0,
           shuffleOptions ? 1 : 0,
           antiCheat ? 1 : 0,
-          parseOptionalLimit(maxTabSwitches),
+          resolveMaxTabSwitches(Boolean(antiCheat), maxTabSwitches),
           parseOptionalAttempts(maxAttempts),
           resolvedOpenAt,
           resolvedCloseAt,
@@ -463,7 +501,7 @@ async function saveExam(req, res, next, isUpdate) {
     let finalShuffleQuestions = shuffleQuestions ? 1 : 0;
     let finalShuffleOptions = shuffleOptions ? 1 : 0;
     let finalAntiCheat = antiCheat ? 1 : 0;
-    let finalMaxTabSwitches = parseOptionalLimit(maxTabSwitches);
+    let finalMaxTabSwitches = resolveMaxTabSwitches(Boolean(antiCheat), maxTabSwitches);
     let finalMaxAttempts = parseOptionalAttempts(maxAttempts);
 
     if (!isUpdate && sessionMode === "NEW_SESSION") {
@@ -538,7 +576,7 @@ async function saveExam(req, res, next, isUpdate) {
         finalShuffleQuestions = tpl.shuffle_questions ? 1 : 0;
         finalShuffleOptions = tpl.shuffle_options ? 1 : 0;
         finalAntiCheat = tpl.anti_cheat ? 1 : 0;
-        finalMaxTabSwitches = parseOptionalLimit(tpl.max_tab_switches);
+        finalMaxTabSwitches = resolveMaxTabSwitches(Boolean(tpl.anti_cheat), tpl.max_tab_switches);
         finalMaxAttempts = parseOptionalAttempts(tpl.max_attempts);
       }
     }
@@ -734,6 +772,7 @@ export async function getAdminLogs(req, res, next) {
 
 export async function getAdminExamOverview(req, res, next) {
   try {
+    const now = new Date();
     const [rows] = await pool.query(`
       SELECT
         e.*,
@@ -742,13 +781,12 @@ export async function getAdminExamOverview(req, res, next) {
         (SELECT COUNT(*) FROM exam_questions eq WHERE eq.exam_id = e.id) AS question_count,
         (SELECT GROUP_CONCAT(eq.question_id ORDER BY eq.order_index ASC) FROM exam_questions eq WHERE eq.exam_id = e.id) AS question_ids_csv,
         (SELECT COUNT(*) FROM submissions sub WHERE sub.exam_id = e.id) AS completed_count,
-        (SELECT COUNT(*) FROM exam_attempts ea WHERE ea.exam_id = e.id AND ea.status = 'IN_PROGRESS' AND ea.started_at >= DATE_SUB(NOW(), INTERVAL (e.duration_minutes + 5) MINUTE)) AS in_progress_count
+        (SELECT COUNT(*) FROM exam_attempts ea WHERE ea.exam_id = e.id AND ea.status = 'IN_PROGRESS' AND ea.started_at >= DATE_SUB(?, INTERVAL (e.duration_minutes + 5) MINUTE)) AS in_progress_count
       FROM exams e
       INNER JOIN subjects s ON e.subject_id = s.id
       ORDER BY e.id DESC
-    `);
+    `, [now]);
 
-    const now = new Date();
     const alwaysOpen = [];
     const inProgressWindow = [];
     const closed = [];
@@ -878,14 +916,16 @@ export async function getExamLeaderboard(req, res, next) {
        INNER JOIN users u ON ea.user_id = u.id
        WHERE ea.exam_id = ?
          AND ea.status = 'IN_PROGRESS'
-         AND ea.started_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+         AND ea.started_at >= DATE_SUB(?, INTERVAL ? MINUTE)
        ORDER BY ea.started_at ASC`,
-      [id, (Number(exam.duration_minutes) || 30) + 5]
+      [id, new Date(), (Number(exam.duration_minutes) || 30) + 5]
     );
 
     const completedCount = leaderboard.length;
     const passScore = Number(exam.pass_score ?? 5);
-    const passedCount = leaderboard.filter((r) => Number(r.score) >= passScore).length;
+    const passedCount = leaderboard.filter(
+      (r) => Number(r.is_suspended) !== 1 && Number(r.score) >= passScore
+    ).length;
     const avgScore =
       completedCount > 0
         ? Number(

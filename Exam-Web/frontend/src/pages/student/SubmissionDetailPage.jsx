@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
+import { useAuth } from "../../context/AuthContext";
 
 function seededShuffle(items, seedStr) {
   const arr = [...items];
@@ -18,6 +19,8 @@ function seededShuffle(items, seedStr) {
 
 export default function SubmissionDetailPage() {
   const { id } = useParams();
+  const { user } = useAuth();
+  const isAdminViewer = ["TEACHER", "ADMIN", "SUPER_ADMIN"].includes(user?.role);
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -47,8 +50,8 @@ export default function SubmissionDetailPage() {
     return (
       <div className="page-container">
         <div className="alert-box alert-error">{error || "Không tìm thấy kết quả."}</div>
-        <Link to="/my-results" className="btn-secondary">
-          ← Quay lại lịch sử làm bài
+        <Link to={isAdminViewer ? "/teacher/exams" : "/my-results"} className="btn-secondary">
+          {isAdminViewer ? "← Quay lại Quản lý điểm" : "← Quay lại lịch sử làm bài"}
         </Link>
       </div>
     );
@@ -67,12 +70,14 @@ export default function SubmissionDetailPage() {
   return (
     <div className="page-container">
       <div className="top-nav-row">
-        <Link to="/my-results" className="back-link">
-          ← Quay lại Lịch sử làm bài
+        <Link to={isAdminViewer ? "/teacher/exams" : "/my-results"} className="back-link">
+          {isAdminViewer ? "← Quay lại Quản lý đề & Bảng điểm" : "← Quay lại Lịch sử làm bài"}
         </Link>
-        <Link to={`/exams/${detail.exam_id}`} className="btn-secondary">
-          🔄 Thi lại đề này
-        </Link>
+        {!isAdminViewer && (
+          <Link to={`/exams/${detail.exam_id}`} className="btn-secondary">
+            🔄 Thi lại đề này
+          </Link>
+        )}
       </div>
 
       <section className="result-hero-card">

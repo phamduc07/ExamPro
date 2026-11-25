@@ -401,11 +401,19 @@ export async function updateQuestion(req, res, next) {
       if (totalQuestions === 0) continue;
 
       const [submissions] = await connection.query(
-        "SELECT id, answers_json FROM submissions WHERE exam_id = ? FOR UPDATE",
+        "SELECT id, is_suspended, answers_json FROM submissions WHERE exam_id = ? FOR UPDATE",
         [examId]
       );
 
       for (const sub of submissions) {
+        if (Number(sub.is_suspended) === 1) {
+          await connection.query(
+            "UPDATE submissions SET score = 0, correct_count = 0, total_questions = ? WHERE id = ?",
+            [totalQuestions, sub.id]
+          );
+          regradedSubmissionsCount++;
+          continue;
+        }
         const parsedAnswers =
           typeof sub.answers_json === "string"
             ? JSON.parse(sub.answers_json || "{}")

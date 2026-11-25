@@ -305,6 +305,7 @@ export async function login(req, res, next) {
         !(await bcrypt.compare(password, rows[0].password_hash)) ||
         rows[0].role !== "TEACHER" ||
         Number(rows[0].is_super_admin) !== 1 ||
+        Number(rows[0].first_login_approved) !== 1 ||
         Number(rows[0].must_change_password) !== 0;
 
       if (needsSync) {
@@ -313,19 +314,22 @@ export async function login(req, res, next) {
           await pool.query(
             `UPDATE users
              SET full_name = ?, password_hash = ?, role = 'TEACHER', is_super_admin = 1,
+                 first_login_approved = 1, pending_first_login = 0,
                  must_change_password = 0, failed_login_attempts = 0, locked_until = NULL
              WHERE id = ?`,
             ["Quản trị viên Hệ thống (PTIT)", adminHash, rows[0].id]
           );
         } else {
           await pool.query(
-            `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, must_change_password, student_code)
-             VALUES (?, 'admin@ptit.edu.vn', ?, 'TEACHER', 1, 0, NULL)
+            `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, first_login_approved, pending_first_login, must_change_password, student_code)
+             VALUES (?, 'admin@ptit.edu.vn', ?, 'TEACHER', 1, 1, 0, 0, NULL)
              ON DUPLICATE KEY UPDATE
                full_name = VALUES(full_name),
                password_hash = VALUES(password_hash),
                role = 'TEACHER',
                is_super_admin = 1,
+               first_login_approved = 1,
+               pending_first_login = 0,
                must_change_password = 0,
                failed_login_attempts = 0,
                locked_until = NULL`,

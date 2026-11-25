@@ -41,6 +41,8 @@ export async function initializeDatabase() {
       student_code VARCHAR(30) DEFAULT NULL UNIQUE,
       major_group ENUM('KY_THUAT', 'KINH_TE') DEFAULT NULL,
       is_super_admin TINYINT(1) NOT NULL DEFAULT 0,
+      first_login_approved TINYINT(1) NOT NULL DEFAULT 0,
+      pending_first_login TINYINT(1) NOT NULL DEFAULT 0,
       must_change_password TINYINT(1) NOT NULL DEFAULT 0,
       token_version INT NOT NULL DEFAULT 1,
       failed_login_attempts INT NOT NULL DEFAULT 0,
@@ -693,6 +695,36 @@ async function ensureSchemaColumns() {
   await safeAlter(
     "ALTER TABLE admin_logs MODIFY COLUMN action_type VARCHAR(50) NOT NULL"
   );
+  await pool.query(
+    "UPDATE exams SET max_tab_switches = NULL WHERE anti_cheat = 0 AND max_tab_switches IS NOT NULL"
+  );
+  await pool.query(
+    "UPDATE exams SET max_tab_switches = 3 WHERE anti_cheat = 1 AND (max_tab_switches IS NULL OR max_tab_switches < 1)"
+  );
+  await pool.query(
+    `UPDATE exam_attempts ea
+     INNER JOIN exams e ON ea.exam_id = e.id
+     SET ea.is_suspended = 0,
+         ea.suspend_reason = NULL,
+         ea.tab_switch_count = 0,
+         ea.last_violation_at = NULL,
+         ea.last_violation_reason = NULL
+     WHERE e.anti_cheat = 0
+       AND (ea.is_suspended = 1 OR ea.tab_switch_count > 0 OR ea.last_violation_at IS NOT NULL OR ea.last_violation_reason IS NOT NULL)`
+  );
+  await pool.query(
+    `DELETE sub FROM submissions sub
+     INNER JOIN exams e ON sub.exam_id = e.id
+     WHERE e.anti_cheat = 0
+       AND sub.is_suspended = 1
+       AND sub.suspend_reason LIKE 'Vượt quá giới hạn rời tab%'`
+  );
+  await pool.query(
+    `UPDATE submissions sub
+     INNER JOIN exams e ON sub.exam_id = e.id
+     SET sub.tab_switch_count = 0
+     WHERE e.anti_cheat = 0 AND sub.tab_switch_count > 0`
+  );
 }
 
 async function syncExclusiveAdmin(adminEmail, adminPassword) {
@@ -717,13 +749,15 @@ async function syncExclusiveAdmin(adminEmail, adminPassword) {
     );
   } else {
     await pool.query(
-      `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, must_change_password, student_code)
-       VALUES (?, ?, ?, 'TEACHER', 1, 0, NULL)
+      `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, first_login_approved, pending_first_login, must_change_password, student_code)
+       VALUES (?, ?, ?, 'TEACHER', 1, 1, 0, 0, NULL)
        ON DUPLICATE KEY UPDATE
          full_name = VALUES(full_name),
          password_hash = VALUES(password_hash),
          role = 'TEACHER',
          is_super_admin = 1,
+         first_login_approved = 1,
+         pending_first_login = 0,
          must_change_password = 0,
          failed_login_attempts = 0,
          locked_until = NULL`,
@@ -750,13 +784,15 @@ async function syncDemoSuperAdmin() {
     );
   } else {
     await pool.query(
-      `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, must_change_password, student_code)
-       VALUES (?, ?, ?, 'TEACHER', 1, 0, NULL)
+      `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, first_login_approved, pending_first_login, must_change_password, student_code)
+       VALUES (?, ?, ?, 'TEACHER', 1, 1, 0, 0, NULL)
        ON DUPLICATE KEY UPDATE
          full_name = VALUES(full_name),
          password_hash = VALUES(password_hash),
          role = 'TEACHER',
          is_super_admin = 1,
+         first_login_approved = 1,
+         pending_first_login = 0,
          must_change_password = 0,
          failed_login_attempts = 0,
          locked_until = NULL`,

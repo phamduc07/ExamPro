@@ -15,21 +15,22 @@ export function validateExam(body, { isMetadataOnly = false } = {}) {
 
   const maxTabSwitches = body.maxTabSwitches;
   if (
+    Boolean(Number(body.antiCheat)) &&
     maxTabSwitches !== null &&
     maxTabSwitches !== undefined &&
     maxTabSwitches !== "" &&
     (!isNumber(maxTabSwitches) || !Number.isInteger(Number(maxTabSwitches)) || Number(maxTabSwitches) < 0)
   ) {
-    return "Giới hạn rời tab phải là số nguyên không âm.";
+    return "Giới hạn rời tab phải là số nguyên dương (mặc định 3 lần nếu để trống).";
   }
   const maxAttempts = body.maxAttempts;
   if (
     maxAttempts !== null &&
     maxAttempts !== undefined &&
     maxAttempts !== "" &&
-    (!isNumber(maxAttempts) || !Number.isInteger(Number(maxAttempts)) || Number(maxAttempts) < 1)
+    (!isNumber(maxAttempts) || !Number.isInteger(Number(maxAttempts)) || Number(maxAttempts) < 0)
   ) {
-    return "Giới hạn lượt làm bài phải là số nguyên từ 1 trở lên.";
+    return "Giới hạn lượt làm bài phải là số nguyên không âm.";
   }
 
   const openAt = body.openAt ? new Date(body.openAt) : null;

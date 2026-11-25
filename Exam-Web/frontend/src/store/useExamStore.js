@@ -52,7 +52,7 @@ export const useExamStore = create(persist((set, get) => ({
     if (
       saved.ownerId === userId &&
       saved.activeExam?.id === examData.id &&
-      saved.totalSeconds === durationSec &&
+      (hasServerStart || saved.totalSeconds === durationSec) &&
       savedIds !== "" &&
       savedIds === incomingIds &&
       sameAttemptStart
@@ -70,6 +70,7 @@ export const useExamStore = create(persist((set, get) => ({
           : saved.startedAt || new Date().toISOString(),
         tabSwitchCount: saved.tabSwitchCount || 0,
         remainingSeconds: Math.max(0, Math.ceil((effectiveDeadline - Date.now()) / 1000)),
+        totalSeconds: durationSec,
       });
       return;
     }

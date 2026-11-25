@@ -38,10 +38,11 @@ export async function submitExam(req, res, next) {
       return res.status(400).json({ success: false, message: "Danh sách đáp án không hợp lệ." });
     }
     const [exams] = await pool.query(
-      "SELECT id, is_published, duration_minutes, major_group, open_at, close_at, max_attempts FROM exams WHERE id = ?",
+      "SELECT id, is_published, duration_minutes, major_group, open_at, close_at, max_attempts, anti_cheat FROM exams WHERE id = ?",
       [Number(examId)]
     );
     if (!exams.length) return res.status(404).json({ success: false, message: "Không tìm thấy đề thi." });
+    const isAntiCheatExam = Boolean(Number(exams[0].anti_cheat));
     if (req.user.role === "STUDENT") {
       if (!exams[0].is_published) {
         return res.status(403).json({ success: false, message: "Đề thi này chưa được mở." });
@@ -175,6 +176,22 @@ export async function submitExam(req, res, next) {
       if (!Number.isNaN(serverStarted.getTime())) {
         const elapsedMs = Date.now() - serverStarted.getTime();
         if (req.user.role === "STUDENT" && elapsedMs > (maxDurationSec + 30) * 1000) {
+          const expiredTabCount = isAntiCheatExam
+            ? Math.max(0, Number(attemptRows[0].tab_switch_count) || 0)
+            : 0;
+          await connection.query(
+            `INSERT INTO submissions
+              (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, answers_json)
+             VALUES (?, ?, 0, 0, ?, ?, ?, ?, '{}')`,
+            [
+              Number(examId),
+              req.user.id,
+              totalQuestions,
+              maxDurationSec,
+              serverStarted,
+              expiredTabCount,
+            ]
+          );
           await connection.query(
             "UPDATE exam_attempts SET status = 'COMPLETED' WHERE exam_id = ? AND user_id = ?",
             [Number(examId), req.user.id]
@@ -183,7 +200,7 @@ export async function submitExam(req, res, next) {
           return res.status(400).json({
             success: false,
             isExpired: true,
-            message: "Bài nộp bị từ chối do đã vượt quá thời gian làm bài cho phép.",
+            message: "Bài nộp bị từ chối do đã vượt quá thời gian làm bài cho phép (ghi nhận 0 điểm).",
           });
         }
         resolvedStartedAt = serverStarted;
@@ -206,7 +223,7 @@ export async function submitExam(req, res, next) {
     }
 
     const serverTabSwitchCount =
-      attemptRows.length > 0
+      isAntiCheatExam && attemptRows.length > 0
         ? Math.max(0, Number(attemptRows[0].tab_switch_count) || 0)
         : 0;
 
@@ -339,7 +356,7 @@ export async function getSubmissionDetail(req, res, next) {
       const studentAttemptCount = Number(attemptCountRows[0]?.cnt || 0);
       const maxAttempts = Number(submission.max_attempts) || 0;
       const isClosedByTime =
-        Boolean(submission.is_exam_closed) ||
+        !Boolean(submission.is_published) ||
         (submission.close_at !== null &&
           submission.close_at !== undefined &&
           new Date(submission.close_at).getTime() <= Date.now());
@@ -519,7 +536,7 @@ export async function deleteSubmission(req, res, next) {
 export async function suspendSubmission(req, res, next) {
   let connection;
   try {
-    const { examId, userId, reason } = req.body;
+    const { examId, userId, submissionId, reason } = req.body;
     if (!isId(examId) || !isId(userId)) {
       return res.status(400).json({
         success: false,
@@ -580,19 +597,25 @@ export async function suspendSubmission(req, res, next) {
       [Number(examId), Number(userId), attemptStartedAt, cleanReason]
     );
 
-    const [existingSub] = wasInProgress
-      ? [[]]
-      : await connection.query(
-          "SELECT id FROM submissions WHERE exam_id = ? AND student_id = ? ORDER BY id DESC LIMIT 1 FOR UPDATE",
-          [Number(examId), Number(userId)]
-        );
+    const [existingSub] =
+      wasInProgress && !isId(submissionId)
+        ? [[]]
+        : isId(submissionId)
+        ? await connection.query(
+            "SELECT id FROM submissions WHERE id = ? AND exam_id = ? AND student_id = ? LIMIT 1 FOR UPDATE",
+            [Number(submissionId), Number(examId), Number(userId)]
+          )
+        : await connection.query(
+            "SELECT id FROM submissions WHERE exam_id = ? AND student_id = ? ORDER BY id DESC LIMIT 1 FOR UPDATE",
+            [Number(examId), Number(userId)]
+          );
 
     if (existingSub.length > 0) {
       await connection.query(
         `UPDATE submissions
-         SET score = 0, correct_count = 0, is_suspended = 1, suspend_reason = ?, submitted_at = NOW()
+         SET score = 0, correct_count = 0, is_suspended = 1, suspend_reason = ?, submitted_at = ?
          WHERE id = ?`,
-        [cleanReason, existingSub[0].id]
+        [cleanReason, new Date(), existingSub[0].id]
       );
     } else {
       const maxDurationSec = (Number(exam.duration_minutes) || 30) * 60;
@@ -646,7 +669,7 @@ export async function suspendSubmission(req, res, next) {
 export async function unsuspendSubmission(req, res, next) {
   let connection;
   try {
-    const { examId, userId } = req.body;
+    const { examId, userId, submissionId } = req.body;
     if (!isId(examId) || !isId(userId)) {
       return res.status(400).json({
         success: false,
@@ -669,15 +692,24 @@ export async function unsuspendSubmission(req, res, next) {
       [Number(userId)]
     );
 
-    const [latestTargetRows] = await connection.query(
-      `SELECT id
-       FROM submissions
-       WHERE exam_id = ? AND student_id = ?
-       ORDER BY is_suspended DESC, (tab_switch_count > 0) DESC, id DESC
-       LIMIT 1
-       FOR UPDATE`,
-      [Number(examId), Number(userId)]
-    );
+    const [latestTargetRows] = isId(submissionId)
+      ? await connection.query(
+          `SELECT id
+           FROM submissions
+           WHERE id = ? AND exam_id = ? AND student_id = ?
+           LIMIT 1
+           FOR UPDATE`,
+          [Number(submissionId), Number(examId), Number(userId)]
+        )
+      : await connection.query(
+          `SELECT id
+           FROM submissions
+           WHERE exam_id = ? AND student_id = ?
+           ORDER BY is_suspended DESC, (tab_switch_count > 0) DESC, id DESC
+           LIMIT 1
+           FOR UPDATE`,
+          [Number(examId), Number(userId)]
+        );
 
     if (latestTargetRows.length > 0) {
       await connection.query("DELETE FROM submissions WHERE id = ?", [
@@ -756,10 +788,25 @@ export async function recordExamViolation(req, res, next) {
       });
     }
 
-    const hasTabLimit =
-      exams[0].max_tab_switches !== null &&
-      exams[0].max_tab_switches !== undefined;
-    const maxAllowed = hasTabLimit ? Number(exams[0].max_tab_switches) : null;
+    const isAntiCheatEnabled = Boolean(Number(exams[0].anti_cheat));
+    if (!isAntiCheatEnabled) {
+      await connection.rollback();
+      return res.status(200).json({
+        success: true,
+        data: {
+          antiCheatEnabled: false,
+          isSuspended: false,
+          tabSwitchCount: 0,
+          maxTabSwitches: null,
+          forceSubmit: false,
+        },
+      });
+    }
+
+    const rawMaxAllowed = Number(exams[0].max_tab_switches);
+    const maxAllowed =
+      Number.isInteger(rawMaxAllowed) && rawMaxAllowed >= 1 ? rawMaxAllowed : 3;
+    const hasTabLimit = true;
 
     const [existingAttempt] = await connection.query(
       `SELECT started_at, status, is_suspended, suspend_reason, tab_switch_count
@@ -856,8 +903,8 @@ export async function recordExamViolation(req, res, next) {
       autoSubmissionId = insertRes.insertId;
 
       await connection.query(
-        "UPDATE exam_attempts SET status = 'COMPLETED' WHERE exam_id = ? AND user_id = ?",
-        [examId, req.user.id]
+        "UPDATE exam_attempts SET status = 'COMPLETED', is_suspended = 1, suspend_reason = ? WHERE exam_id = ? AND user_id = ?",
+        [autoReason, examId, req.user.id]
       );
     }
 
@@ -891,9 +938,10 @@ export async function getExamAttemptStatus(req, res, next) {
     }
 
     const [rows] = await pool.query(
-      `SELECT status, is_suspended, suspend_reason, tab_switch_count
-       FROM exam_attempts
-       WHERE exam_id = ? AND user_id = ?
+      `SELECT ea.status, ea.is_suspended, ea.suspend_reason, ea.tab_switch_count, e.anti_cheat
+       FROM exam_attempts ea
+       INNER JOIN exams e ON ea.exam_id = e.id
+       WHERE ea.exam_id = ? AND ea.user_id = ?
        LIMIT 1`,
       [examId, req.user.id]
     );
@@ -911,13 +959,17 @@ export async function getExamAttemptStatus(req, res, next) {
     }
 
     const row = rows[0];
+    const antiCheatOn = Boolean(Number(row.anti_cheat));
+    const isTabAutoSuspend =
+      !antiCheatOn &&
+      String(row.suspend_reason || "").startsWith("Vượt quá giới hạn rời tab");
     return res.status(200).json({
       success: true,
       data: {
-        isSuspended: Number(row.is_suspended) === 1,
-        suspendReason: row.suspend_reason || null,
+        isSuspended: isTabAutoSuspend ? false : Number(row.is_suspended) === 1,
+        suspendReason: isTabAutoSuspend ? null : row.suspend_reason || null,
         status: row.status,
-        tabSwitchCount: Math.max(0, Number(row.tab_switch_count) || 0),
+        tabSwitchCount: antiCheatOn ? Math.max(0, Number(row.tab_switch_count) || 0) : 0,
       },
     });
   } catch (error) {

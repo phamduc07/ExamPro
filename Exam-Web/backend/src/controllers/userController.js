@@ -187,8 +187,13 @@ export async function createAdmin(req, res, next) {
     const superPassOk = await bcrypt.compare(superAdminPassword, superRows[0].password_hash);
     if (!superPassOk) {
       const nextFails = (superAdminPwdFailures.get(req.user.id) || 0) + 1;
-      if (nextFails > MAX_SUPER_ADMIN_CONFIRM_FAILS) {
+      if (nextFails >= MAX_SUPER_ADMIN_CONFIRM_FAILS) {
         superAdminPwdFailures.delete(req.user.id);
+        await pool.query(
+          "UPDATE users SET token_version = token_version + 1 WHERE id = ?",
+          [req.user.id]
+        );
+        invalidateTokenVersionCache(req.user.id);
         return res.status(400).json({
           success: false,
           forceLogout: true,
@@ -334,13 +339,17 @@ export async function deleteAdmin(req, res, next) {
       });
     }
     const target = rows[0];
-    if (Number(target.is_super_admin) === 1) {
+    if (
+      Number(target.is_super_admin) === 1 ||
+      target.id === req.user.id ||
+      String(target.email || "").trim().toLowerCase() === "admin@ptit.edu.vn"
+    ) {
       return res.status(403).json({
         success: false,
         message: "Không thể xóa tài khoản Super Admin gốc.",
       });
     }
-    if (target.role !== "TEACHER") {
+    if (!["TEACHER", "ADMIN"].includes(target.role)) {
       return res.status(403).json({
         success: false,
         message: "Chỉ được phép xóa tài khoản Quản trị viên thường.",
@@ -348,7 +357,7 @@ export async function deleteAdmin(req, res, next) {
     }
 
     await pool.query("DELETE FROM login_otps WHERE user_id = ?", [targetId]);
-    await pool.query("DELETE FROM users WHERE id = ? AND role = 'TEACHER' AND is_super_admin = 0", [targetId]);
+    await pool.query("DELETE FROM users WHERE id = ? AND role IN ('TEACHER', 'ADMIN') AND is_super_admin = 0", [targetId]);
     invalidateTokenVersionCache(targetId);
 
     await pool.query(
@@ -437,7 +446,11 @@ export async function revokeAdmin(req, res, next) {
       });
     }
     const target = rows[0];
-    if (Number(target.is_super_admin) === 1) {
+    if (
+      Number(target.is_super_admin) === 1 ||
+      target.id === req.user.id ||
+      String(target.email || "").trim().toLowerCase() === "admin@ptit.edu.vn"
+    ) {
       return res.status(403).json({
         success: false,
         message: "Không thể thu hồi quyền của tài khoản Super Admin gốc.",
@@ -456,6 +469,7 @@ export async function revokeAdmin(req, res, next) {
            is_super_admin = 0,
            first_login_approved = 0,
            pending_first_login = 0,
+           must_change_password = 0,
            student_code = ?,
            major_group = ?,
            token_version = token_version + 1

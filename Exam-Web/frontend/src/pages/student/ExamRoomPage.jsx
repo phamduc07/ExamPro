@@ -105,7 +105,9 @@ export default function ExamRoomPage() {
         if (cancelled) return;
         if (!res.data.data.questions?.length) throw new Error("Đề thi chưa có câu hỏi.");
         startExamSession(res.data.data, user.id);
-        if (typeof res.data.data.current_tab_switch_count === "number") {
+        if (!Boolean(Number(res.data.data.anti_cheat))) {
+          setTabSwitchCount(0);
+        } else if (typeof res.data.data.current_tab_switch_count === "number") {
           setTabSwitchCount(res.data.data.current_tab_switch_count);
         }
       })
@@ -181,14 +183,14 @@ export default function ExamRoomPage() {
           });
           return;
         }
-        if (err.response?.data?.isExpired) {
+        if (err.response?.data?.isExpired || err.response?.status === 409) {
           resetExamSession();
           if (document.fullscreenElement && document.exitFullscreen) {
             document.exitFullscreen().catch(() => {});
           }
           showToast(
-            err.response.data.message || "Đã vượt quá thời gian làm bài cho phép.",
-            "error"
+            err.response?.data?.message || "Lượt làm bài đã kết thúc.",
+            err.response?.status === 409 ? "warning" : "error"
           );
           navigate("/my-results", { replace: true });
           return;
@@ -272,9 +274,18 @@ export default function ExamRoomPage() {
     };
   }, [id, loading, activeExam, violationModal, lockRoomWithModal]);
 
+  useEffect(() => {
+    return () => {
+      if (autoSubmitTimerRef.current) {
+        clearTimeout(autoSubmitTimerRef.current);
+        autoSubmitTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const reportViolationToServer = useCallback(
     async (reason) => {
-      if (submitLockRef.current) return null;
+      if (submitLockRef.current || !Boolean(Number(activeExam?.anti_cheat))) return null;
       const baseUrl = String(
         axiosClient.defaults.baseURL || "http://localhost:5000/api"
       ).replace(/\/$/, "");
@@ -328,18 +339,19 @@ export default function ExamRoomPage() {
       }
       return null;
     },
-    [id, setTabSwitchCount, lockRoomWithModal]
+    [id, activeExam?.anti_cheat, setTabSwitchCount, lockRoomWithModal]
   );
 
   useEffect(() => {
-    if (loading || !activeExam) return;
+    if (loading || !activeExam || !Boolean(Number(activeExam.anti_cheat))) return;
 
     const recordTabLeave = (reason = "Rời tab / Chuyển cửa sổ") => {
       if (submitLockRef.current) return;
       const now = Date.now();
-      if (now - lastTabSwitchRef.current < 500) return;
+      if (now - lastTabSwitchRef.current < 1200) return;
       lastTabSwitchRef.current = now;
       incrementTabSwitch();
+      setAntiCheatWarning(`🚨 Cảnh báo Anti-Cheat: ${reason}`);
       reportViolationToServer(reason);
     };
 
@@ -360,22 +372,22 @@ export default function ExamRoomPage() {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("blur", handleWindowBlur);
-      if (autoSubmitTimerRef.current) {
-        clearTimeout(autoSubmitTimerRef.current);
-        autoSubmitTimerRef.current = null;
-      }
     };
   }, [loading, activeExam, incrementTabSwitch, reportViolationToServer]);
 
   const requestExamFullscreen = useCallback(() => {
-    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+    if (
+      Boolean(Number(activeExam?.anti_cheat)) &&
+      !document.fullscreenElement &&
+      document.documentElement.requestFullscreen
+    ) {
       ignoreBlurUntilRef.current = Date.now() + 1000;
       document.documentElement.requestFullscreen().catch(() => {});
     }
-  }, []);
+  }, [activeExam?.anti_cheat]);
 
   useEffect(() => {
-    if (loading || !activeExam || !Boolean(activeExam.anti_cheat)) return;
+    if (loading || !activeExam || !Boolean(Number(activeExam.anti_cheat))) return;
 
     setIsFullscreen(Boolean(document.fullscreenElement));
     ignoreBlurUntilRef.current = Math.max(
@@ -386,7 +398,7 @@ export default function ExamRoomPage() {
     const triggerViolation = (reasonText) => {
       if (submitLockRef.current) return;
       const now = Date.now();
-      if (now - lastTabSwitchRef.current < 1500) return;
+      if (now - lastTabSwitchRef.current < 1200) return;
       lastTabSwitchRef.current = now;
       incrementTabSwitch();
       setAntiCheatWarning(`🚨 Cảnh báo Anti-Cheat: ${reasonText}`);
@@ -450,10 +462,13 @@ export default function ExamRoomPage() {
   const progressPercent = totalQ > 0 ? Math.round((answeredCount / totalQ) * 100) : 0;
   const isFlagged = flaggedQuestions.includes(currentQuestion.id);
   const isTimeUrgent = remainingSeconds <= 180;
-  const hasTabLimit =
-    activeExam.max_tab_switches !== null &&
-    activeExam.max_tab_switches !== undefined;
-  const maxTabSwitches = hasTabLimit ? Number(activeExam.max_tab_switches) : null;
+  const isAntiCheat = Boolean(Number(activeExam.anti_cheat));
+  const maxTabSwitches = isAntiCheat
+    ? Number(activeExam.max_tab_switches) >= 1
+      ? Number(activeExam.max_tab_switches)
+      : 3
+    : null;
+  const hasTabLimit = isAntiCheat;
 
   const baseOptions = [
     { key: "A", text: currentQuestion.option_a },
@@ -468,8 +483,6 @@ export default function ExamRoomPage() {
         `${activeExam.id}-${currentQuestion.id}-${startedAt || ""}`
       )
     : baseOptions;
-
-  const isAntiCheat = Boolean(activeExam.anti_cheat);
 
   return (
     <div
@@ -513,24 +526,23 @@ export default function ExamRoomPage() {
                   ⛶ Toàn màn hình
                 </button>
               )}
+
+              <div
+                className={`tab-switch-badge ${
+                  tabSwitchCount === 0
+                    ? "safe"
+                    : hasTabLimit && tabSwitchCount >= maxTabSwitches
+                    ? "danger"
+                    : tabSwitchCount <= 2
+                    ? "warn"
+                    : "danger"
+                }`}
+                title="Số lần bạn rời khỏi tab hoặc cửa sổ phòng thi"
+              >
+                👁️ Rời tab: <strong>{tabSwitchCount}</strong>/{maxTabSwitches}
+              </div>
             </>
           )}
-
-          <div
-            className={`tab-switch-badge ${
-              tabSwitchCount === 0
-                ? "safe"
-                : hasTabLimit && tabSwitchCount >= maxTabSwitches
-                ? "danger"
-                : tabSwitchCount <= 2
-                ? "warn"
-                : "danger"
-            }`}
-            title="Số lần bạn rời khỏi tab hoặc cửa sổ phòng thi"
-          >
-            👁️ Rời tab: <strong>{tabSwitchCount}</strong>
-            {hasTabLimit ? `/${maxTabSwitches}` : " lần"}
-          </div>
 
           <div className={`countdown-badge ${isTimeUrgent ? "urgent" : ""}`}>
             <span className="clock-icon">⏱️</span>

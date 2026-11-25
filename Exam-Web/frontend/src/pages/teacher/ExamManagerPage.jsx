@@ -232,11 +232,13 @@ export default function ExamManagerPage() {
       shuffleQuestions: sessionTemplateExam.shuffle_questions ? 1 : 0,
       shuffleOptions: sessionTemplateExam.shuffle_options ? 1 : 0,
       antiCheat: sessionTemplateExam.anti_cheat ? 1 : 0,
-      maxTabSwitches:
-        sessionTemplateExam.max_tab_switches === null ||
-        sessionTemplateExam.max_tab_switches === undefined
-          ? null
-          : String(Number(sessionTemplateExam.max_tab_switches)),
+      maxTabSwitches: sessionTemplateExam.anti_cheat
+        ? String(
+            Number(sessionTemplateExam.max_tab_switches) >= 1
+              ? Number(sessionTemplateExam.max_tab_switches)
+              : 3
+          )
+        : null,
       maxAttempts:
         sessionTemplateExam.max_attempts === null ||
         sessionTemplateExam.max_attempts === undefined ||
@@ -323,8 +325,8 @@ export default function ExamManagerPage() {
       setQuestions(qRes.data.data || []);
       setSubmissions(sumRes.data.data || []);
 
-      if (subList.length > 0 && !form.subjectId) {
-        setForm((prev) => ({ ...prev, subjectId: subList[0].id }));
+      if (subList.length > 0) {
+        setForm((prev) => (prev.subjectId ? prev : { ...prev, subjectId: subList[0].id }));
       }
     } catch (err) {
       setNotice({
@@ -506,10 +508,13 @@ export default function ExamManagerPage() {
         shuffleQuestions: detail.shuffle_questions ? 1 : 0,
         shuffleOptions: detail.shuffle_options ? 1 : 0,
         antiCheat: detail.anti_cheat ? 1 : 0,
-        maxTabSwitches:
-          detail.max_tab_switches === null || detail.max_tab_switches === undefined
-            ? null
-            : String(Number(detail.max_tab_switches)),
+        maxTabSwitches: detail.anti_cheat
+          ? String(
+              Number(detail.max_tab_switches) >= 1
+                ? Number(detail.max_tab_switches)
+                : 3
+            )
+          : null,
         maxAttempts:
           detail.max_attempts === null ||
           detail.max_attempts === undefined ||
@@ -557,11 +562,11 @@ export default function ExamManagerPage() {
 
     if (
       form.maxAttempts !== null &&
-      (form.maxAttempts === "" || Number(form.maxAttempts) < 1)
+      (form.maxAttempts === "" || Number(form.maxAttempts) < 0)
     ) {
       setNotice({
         type: "error",
-        text: "⚠️ Giới hạn số lượt thi phải từ 1 lượt trở lên (hoặc tích chọn Không giới hạn).",
+        text: "⚠️ Giới hạn số lượt thi phải là số nguyên không âm (0 hoặc tích chọn Không giới hạn).",
       });
       return;
     }
@@ -573,12 +578,13 @@ export default function ExamManagerPage() {
       examShift: !editingId && sessionMode === "FREE" ? "" : form.examShift,
       durationMinutes: Number(form.durationMinutes) || 25,
       passScore: form.passScore === "" ? 5 : Number(form.passScore),
-      maxTabSwitches:
-        form.maxTabSwitches === null || form.maxTabSwitches === ""
-          ? null
-          : Number(form.maxTabSwitches),
+      maxTabSwitches: Boolean(form.antiCheat)
+        ? Number(form.maxTabSwitches) >= 1
+          ? Number(form.maxTabSwitches)
+          : 3
+        : null,
       maxAttempts:
-        form.maxAttempts === null || form.maxAttempts === ""
+        form.maxAttempts === null || form.maxAttempts === "" || Number(form.maxAttempts) <= 0
           ? null
           : Number(form.maxAttempts),
       openAt: form.openAt ? new Date(form.openAt).toISOString() : null,
@@ -632,10 +638,13 @@ export default function ExamManagerPage() {
         shuffleQuestions: detail.shuffle_questions ? 1 : 0,
         shuffleOptions: detail.shuffle_options ? 1 : 0,
         antiCheat: detail.anti_cheat ? 1 : 0,
-        maxTabSwitches:
-          detail.max_tab_switches === null || detail.max_tab_switches === undefined
-            ? null
-            : String(Number(detail.max_tab_switches)),
+        maxTabSwitches: detail.anti_cheat
+          ? String(
+              Number(detail.max_tab_switches) >= 1
+                ? Number(detail.max_tab_switches)
+                : 3
+            )
+          : null,
         maxAttempts:
           detail.max_attempts === null ||
           detail.max_attempts === undefined ||
@@ -1123,8 +1132,12 @@ export default function ExamManagerPage() {
                       setForm((p) => ({
                         ...p,
                         antiCheat: checked ? 1 : 0,
-                        maxTabSwitches: checked ? "1" : null,
-                        maxAttempts: checked ? "1" : null,
+                        maxTabSwitches: checked
+                          ? Number(p.maxTabSwitches) >= 1
+                            ? String(p.maxTabSwitches)
+                            : "3"
+                          : null,
+                        maxAttempts: checked ? p.maxAttempts ?? "1" : null,
                       }));
                     }}
                   />
@@ -1140,52 +1153,33 @@ export default function ExamManagerPage() {
 
                 <div className="form-row-2">
                   <div className="form-field">
-                    <label>Giới hạn rời tab tối đa</label>
-                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        placeholder="Không giới hạn"
-                        disabled={isSessionLocked || form.maxTabSwitches === null}
-                        value={form.maxTabSwitches === null ? "" : form.maxTabSwitches}
-                        onChange={(e) =>
-                          setForm((p) => ({
-                            ...p,
-                            maxTabSwitches: sanitizeIntInput(e.target.value),
-                          }))
-                        }
-                        style={{ flex: 1 }}
-                      />
-                      <label
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: "6px",
-                          whiteSpace: "nowrap",
-                          cursor: isSessionLocked ? "not-allowed" : "pointer",
-                          fontSize: "0.84rem",
-                          color: "var(--text-secondary)",
-                          margin: 0,
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          disabled={isSessionLocked}
-                          checked={form.maxTabSwitches === null}
-                          onChange={(e) =>
-                            setForm((p) => ({
-                              ...p,
-                              maxTabSwitches: e.target.checked ? null : "0",
-                            }))
-                          }
-                          style={{ width: "auto" }}
-                        />
-                        Không giới hạn
-                      </label>
-                    </div>
+                    <label>Giới hạn rời tab tối đa (Khi bật Anti-Cheat)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder={
+                        form.antiCheat
+                          ? "Mặc định: 3 lần"
+                          : "Đang tắt Anti-Cheat (Không áp dụng)"
+                      }
+                      disabled={isSessionLocked || !Boolean(form.antiCheat)}
+                      value={
+                        Boolean(form.antiCheat)
+                          ? form.maxTabSwitches ?? ""
+                          : ""
+                      }
+                      onChange={(e) =>
+                        setForm((p) => ({
+                          ...p,
+                          maxTabSwitches: sanitizeIntInput(e.target.value),
+                        }))
+                      }
+                    />
                     <div className="sub-text">
-                      Gợi ý: 1 lần cảnh báo trước khi khóa bài; đặt 0 nếu muốn khóa ngay lập tức
+                      {form.antiCheat
+                        ? "Tối thiểu 1 lần (mặc định 3 lần nếu để trống)"
+                        : "Bật chế độ Anti-Cheat ở trên nếu muốn giám sát chuyển tab"}
                     </div>
                   </div>
 

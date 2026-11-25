@@ -114,15 +114,7 @@ export default function ExamDetailPage() {
                 đang phân vân để dễ dàng quay lại kiểm tra trước khi nộp.
               </li>
               <li>
-                Giới hạn rời tab:{" "}
-                <strong>
-                  {exam.max_tab_switches === null || exam.max_tab_switches === undefined
-                    ? "Không giới hạn"
-                    : Number(exam.max_tab_switches) === 0
-                    ? "0 lần (Nghiêm ngặt - Cấm rời tab)"
-                    : `${exam.max_tab_switches} lần`}
-                </strong>
-                . Giới hạn số lượt thi:{" "}
+                Giới hạn số lượt thi:{" "}
                 <strong>
                   {exam.max_attempts === null ||
                   exam.max_attempts === undefined ||
@@ -132,6 +124,17 @@ export default function ExamDetailPage() {
                 </strong>
                 .
               </li>
+              {Boolean(Number(exam.anti_cheat)) && (
+                <li>
+                  🛡️ Đề thi bật <strong>Chống gian lận nghiêm ngặt (Anti-Cheat)</strong>: yêu cầu làm bài Toàn màn hình, khóa sao chép và giới hạn rời tab tối đa{" "}
+                  <strong>
+                    {Number(exam.max_tab_switches) >= 1
+                      ? `${exam.max_tab_switches} lần`
+                      : "3 lần"}
+                  </strong>
+                  .
+                </li>
+              )}
               <li>
                 Khi hết thời gian quy định, hệ thống sẽ{" "}
                 <strong>tự động thu bài</strong> và chấm điểm dựa trên các phương án
@@ -157,7 +160,7 @@ export default function ExamDetailPage() {
               className="btn-start-exam"
               disabled={!agreed || questionCount === 0}
               onClick={() => {
-                if (exam?.anti_cheat && !document.fullscreenElement) {
+                if (Boolean(Number(exam?.anti_cheat)) && !document.fullscreenElement) {
                   const el = document.documentElement;
                   const reqFs =
                     el.requestFullscreen ||

@@ -7,7 +7,7 @@ import AdminExamMonitor from "../../components/AdminExamMonitor";
 
 export default function HomePage() {
   const { user } = useAuth();
-  if (user?.role === "TEACHER" || user?.role === "ADMIN") {
+  if (["TEACHER", "ADMIN", "SUPER_ADMIN"].includes(user?.role)) {
     return <AdminExamMonitor />;
   }
   return <StudentHomePage />;
@@ -310,17 +310,6 @@ function StudentHomePage() {
                               <strong>{exam.pass_score}/10</strong>
                             </div>
                             <div className="spec-pill">
-                              <span>👁️ Rời tab:</span>
-                              <strong>
-                                {exam.max_tab_switches === null ||
-                                exam.max_tab_switches === undefined
-                                  ? "Không giới hạn"
-                                  : Number(exam.max_tab_switches) === 0
-                                  ? "0 lần (Nghiêm ngặt - Cấm rời tab)"
-                                  : `${exam.max_tab_switches} lần`}
-                              </strong>
-                            </div>
-                            <div className="spec-pill">
                               <span>🔁 Lượt thi:</span>
                               <strong>
                                 {exam.max_attempts === null ||
@@ -330,10 +319,20 @@ function StudentHomePage() {
                                   : `${exam.max_attempts} lượt`}
                               </strong>
                             </div>
-                            {Boolean(exam.anti_cheat) && (
-                              <span className="tab-switch-badge danger">
-                                🛡️ Giám sát Anti-Cheat
-                              </span>
+                            {Boolean(Number(exam.anti_cheat)) && (
+                              <>
+                                <div className="spec-pill">
+                                  <span>👁️ Rời tab:</span>
+                                  <strong>
+                                    {Number(exam.max_tab_switches) >= 1
+                                      ? `${exam.max_tab_switches} lần`
+                                      : "3 lần"}
+                                  </strong>
+                                </div>
+                                <span className="tab-switch-badge danger">
+                                  🛡️ Giám sát Anti-Cheat
+                                </span>
+                              </>
                             )}
                           </div>
 

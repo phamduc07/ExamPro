@@ -168,8 +168,8 @@ export default function AdminExamMonitor() {
     }
   };
 
-  const openSuspendModal = (examId, userId, fullName, studentCode = "") => {
-    setSuspendTarget({ examId, userId, fullName, studentCode });
+  const openSuspendModal = (examId, userId, fullName, studentCode = "", submissionId = null) => {
+    setSuspendTarget({ examId, userId, fullName, studentCode, submissionId });
     setSuspendReason("Vi phạm quy chế phòng thi");
   };
 
@@ -181,6 +181,7 @@ export default function AdminExamMonitor() {
       await axiosClient.post("/submissions/suspend", {
         examId: suspendTarget.examId,
         userId: suspendTarget.userId,
+        ...(suspendTarget.submissionId ? { submissionId: suspendTarget.submissionId } : {}),
         reason: suspendReason.trim() || "Vi phạm quy chế phòng thi",
       });
       const targetExamId = suspendTarget.examId;
@@ -195,8 +196,8 @@ export default function AdminExamMonitor() {
     }
   };
 
-  const openReopenModal = (examId, userId, fullName, studentCode = "", examTitle = "") => {
-    setReopenTarget({ examId, userId, fullName, studentCode, examTitle });
+  const openReopenModal = (examId, userId, fullName, studentCode = "", examTitle = "", submissionId = null) => {
+    setReopenTarget({ examId, userId, fullName, studentCode, examTitle, submissionId });
   };
 
   const handleConfirmReopen = async () => {
@@ -206,6 +207,7 @@ export default function AdminExamMonitor() {
       await axiosClient.post("/submissions/unsuspend", {
         examId: reopenTarget.examId,
         userId: reopenTarget.userId,
+        ...(reopenTarget.submissionId ? { submissionId: reopenTarget.submissionId } : {}),
       });
       const targetExamId = reopenTarget.examId;
       const targetName = reopenTarget.fullName;
@@ -785,7 +787,8 @@ export default function AdminExamMonitor() {
                                                 row.student_id,
                                                 row.full_name,
                                                 row.student_code,
-                                                leaderboardData?.exam?.title || ""
+                                                leaderboardData?.exam?.title || "",
+                                                row.submission_id
                                               )
                                             }
                                           >
@@ -800,7 +803,8 @@ export default function AdminExamMonitor() {
                                                   selectedExamId,
                                                   row.student_id,
                                                   row.full_name,
-                                                  row.student_code
+                                                  row.student_code,
+                                                  row.submission_id
                                                 )
                                               }
                                             >

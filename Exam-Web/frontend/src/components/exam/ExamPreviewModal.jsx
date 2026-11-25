@@ -26,11 +26,11 @@ export default function ExamPreviewModal({
               ⏱️ {form.durationMinutes} phút • 📝 {selectedQuestionObjects.length} câu • 🎯 Điểm đạt: {form.passScore}/10
               {form.shuffleQuestions ? " • 🔀 Trộn câu hỏi" : ""}
               {form.shuffleOptions ? " • 🔀 Trộn đáp án" : ""}
-              {form.maxTabSwitches !== null
-                ? Number(form.maxTabSwitches) === 0
-                  ? " • 🛡️ 0 lần rời tab (Nghiêm ngặt)"
-                  : ` • 🛡️ Tối đa ${form.maxTabSwitches} lần rời tab`
-                : " • 🛡️ Rời tab: Không giới hạn"}
+              {Boolean(form.antiCheat)
+                ? ` • 🛡️ Anti-Cheat (Tối đa ${
+                    Number(form.maxTabSwitches) >= 1 ? form.maxTabSwitches : 3
+                  } lần rời tab)`
+                : ""}
               {form.maxAttempts !== null && Number(form.maxAttempts) >= 1
                 ? ` • 🔁 Tối đa ${form.maxAttempts} lượt`
                 : " • 🔁 Lượt thi: Không giới hạn"}

@@ -68,6 +68,8 @@ const authLimiter = rateLimit({
   keyGenerator: (req) => {
     const emailPart = req.body?.email
       ? String(req.body.email).trim().toLowerCase()
+      : req.body?.challengeToken
+      ? String(req.body.challengeToken).slice(-16)
       : "";
     return `${req.ip || "unknown"}_${emailPart}`;
   },

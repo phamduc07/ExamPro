@@ -112,7 +112,10 @@ export default function MyResultsPage() {
 
   const totalTaken = submissions.length;
   const passedCount = submissions.filter(
-    (s) => Number(s.score) >= Number(s.pass_score ?? 5)
+    (s) =>
+      Number(s.is_suspended) !== 1 &&
+      !s.suspend_reason &&
+      Number(s.score) >= Number(s.pass_score ?? 5)
   ).length;
   const avgScore =
     totalTaken > 0

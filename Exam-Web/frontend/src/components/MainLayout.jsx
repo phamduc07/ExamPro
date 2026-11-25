@@ -80,7 +80,7 @@ export default function MainLayout() {
     }
   };
 
-  const isTeacher = user?.role === "TEACHER";
+  const isTeacher = ["TEACHER", "ADMIN", "SUPER_ADMIN"].includes(user?.role);
   const roleLabel = isTeacher
     ? Number(user?.is_super_admin) === 1
       ? "👑 Super Admin"
