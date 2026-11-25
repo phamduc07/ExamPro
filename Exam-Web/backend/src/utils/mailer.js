@@ -46,8 +46,13 @@ function getSmtpConfig() {
   return { host, port, secure, user, pass, from };
 }
 
+function getBrevoApiKey() {
+  return (process.env.BREVO_API_KEY || "").trim();
+}
+
 export function isMailerConfigured() {
   if (customMailSender) return true;
+  if (getBrevoApiKey()) return true;
   const { user, pass } = getSmtpConfig();
   return Boolean(
     user &&
@@ -55,6 +60,79 @@ export function isMailerConfigured() {
       user !== "your_gmail@gmail.com" &&
       pass !== "your_gmail_app_password"
   );
+}
+
+function parseSender(fromStr, fallbackEmail) {
+  const match = String(fromStr || "").match(/^(.*?)\s*<([^>]+)>$/);
+  if (match) {
+    return {
+      name: match[1].replace(/["']/g, "").trim() || "PTIT ExamPro",
+      email: match[2].trim(),
+    };
+  }
+  return {
+    name: "PTIT ExamPro",
+    email: String(fromStr || fallbackEmail || "").trim(),
+  };
+}
+
+async function dispatchEmail({ to, subject, text, html }) {
+  const brevoApiKey = getBrevoApiKey();
+  const { host, port, secure, user, pass, from } = getSmtpConfig();
+
+  if (brevoApiKey) {
+    const sender = parseSender(from, user || "examptit@gmail.com");
+    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "api-key": brevoApiKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        sender,
+        to: [{ email: String(to).trim() }],
+        subject,
+        textContent: text,
+        htmlContent: html,
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => ({}));
+      const errMsg = errBody.message || `Brevo API HTTP ${response.status}`;
+      const err = new Error(errMsg);
+      if (response.status === 400 && /invalid.*email/i.test(errMsg)) {
+        err.code = "EENVELOPE";
+      } else if (response.status === 401 || response.status === 403) {
+        err.code = "EAUTH";
+      }
+      throw err;
+    }
+    return;
+  }
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+  });
+
+  const info = await transporter.sendMail({
+    from,
+    to,
+    subject,
+    text,
+    html,
+  });
+
+  if (Array.isArray(info?.rejected) && info.rejected.length > 0) {
+    throw Object.assign(new Error("Email không tồn tại."), { statusCode: 400 });
+  }
 }
 
 export async function sendRegisterOtpEmail({ to, fullName, otp, expiresMinutes = 5 }) {
@@ -109,28 +187,15 @@ async function sendOtpMailInternal({ to, fullName, otp, expiresMinutes = 5, subj
 
   if (!isMailerConfigured()) {
     throw Object.assign(
-      new Error("Hệ thống gửi email OTP chưa được cấu hình. Hãy điền SMTP_USER và SMTP_PASS trong backend/.env."),
+      new Error("Hệ thống gửi email OTP chưa được cấu hình. Hãy điền BREVO_API_KEY hoặc SMTP_USER trong cấu hình."),
       { statusCode: 503 }
     );
   }
 
-  const { host, port, secure, user, pass, from } = getSmtpConfig();
-
-  const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 20000,
-  });
-
   const safeName = (fullName || "bạn").replace(/[<>&"]/g, "");
 
   try {
-    const info = await transporter.sendMail({
-      from,
+    await dispatchEmail({
       to,
       subject,
       text:
@@ -154,10 +219,10 @@ async function sendOtpMailInternal({ to, fullName, otp, expiresMinutes = 5, subj
               <div style="font-size: 34px; font-weight: 800; letter-spacing: 10px; color: #38bdf8; font-family: Consolas, monospace;">${otp}</div>
             </div>
             <p style="margin: 0 0 8px; font-size: 13px; color: #94a3b8;">
-              • Mã OTP có hiệu lực trong vòng <strong style="color: #f8fafc;">${expiresMinutes} phút</strong>.
+- Mã OTP có hiệu lực trong vòng <strong style="color: #f8fafc;">${expiresMinutes} phút</strong>.
             </p>
             <p style="margin: 0; font-size: 13px; color: #94a3b8;">
-              • Không chia sẻ mã này cho bất kỳ ai. ${footerNote}
+- Không chia sẻ mã này cho bất kỳ ai. ${footerNote}
             </p>
           </div>
           <div style="background: #020617; padding: 14px 28px; text-align: center; font-size: 12px; color: #64748b;">
@@ -166,9 +231,6 @@ async function sendOtpMailInternal({ to, fullName, otp, expiresMinutes = 5, subj
         </div>
       `,
     });
-    if (Array.isArray(info?.rejected) && info.rejected.length > 0) {
-      throw Object.assign(new Error("Email không tồn tại."), { statusCode: 400 });
-    }
   } catch (error) {
     if (error.statusCode === 400) throw error;
     console.error("📧 [Mailer Error]:", error.code || error.message);
@@ -177,47 +239,26 @@ async function sendOtpMailInternal({ to, fullName, otp, expiresMinutes = 5, subj
     }
     if (error.code === "EAUTH" || error.responseCode === 535) {
       throw Object.assign(
-        new Error("Xác thực email gửi đi thất bại. Hãy kiểm tra lại SMTP_USER và Mật khẩu ứng dụng (SMTP_PASS) trong backend/.env."),
+        new Error("Xác thực dịch vụ gửi email thất bại. Hãy kiểm tra lại BREVO_API_KEY hoặc cấu hình SMTP."),
         { statusCode: 502 }
       );
     }
     throw Object.assign(
-      new Error("Không thể gửi email xác thực OTP lúc này. Vui lòng kiểm tra kết nối mạng và cấu hình SMTP."),
+      new Error("Không thể gửi email xác thực OTP lúc này. Vui lòng kiểm tra kết nối mạng và cấu hình gửi thư."),
       { statusCode: 502 }
     );
   }
 }
 
-
 export async function sendNewAdminCredentialsEmail({ to, fullName, tempPassword }) {
-  const host = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
-  const port = Number(process.env.SMTP_PORT || 465);
-  const secure = process.env.SMTP_SECURE
-    ? process.env.SMTP_SECURE === "true"
-    : port === 465;
-  const user = (process.env.SMTP_USER || "").trim();
-  const pass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
-  const from = (process.env.SMTP_FROM || `PTIT ExamPro <${user}>`).trim();
-
-  if (!user || !pass) {
+  if (!isMailerConfigured()) {
     return false;
   }
-
-  const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 20000,
-  });
 
   const safeName = (fullName || "Quản trị viên").replace(/[<>&"]/g, "");
 
   try {
-    await transporter.sendMail({
-      from,
+    await dispatchEmail({
       to,
       subject: "[PTIT ExamPro] Thông báo cấp quyền Quản trị viên & Mật khẩu tạm thời",
       text:
@@ -242,10 +283,10 @@ export async function sendNewAdminCredentialsEmail({ to, fullName, tempPassword 
               <div style="font-size: 24px; font-weight: 800; letter-spacing: 2px; color: #38bdf8; font-family: Consolas, monospace;">${tempPassword}</div>
             </div>
             <p style="margin: 0 0 8px; font-size: 13px; color: #94a3b8;">
-              • Email đăng nhập: <strong style="color: #f8fafc;">${to}</strong>
+- Email đăng nhập: <strong style="color: #f8fafc;">${to}</strong>
             </p>
             <p style="margin: 0; font-size: 13px; color: #94a3b8;">
-              • Bạn bắt buộc phải <strong style="color: #f8fafc;">đổi mật khẩu cá nhân ngay trong lần đăng nhập đầu tiên</strong>.
+- Bạn bắt buộc phải <strong style="color: #f8fafc;">đổi mật khẩu cá nhân ngay trong lần đăng nhập đầu tiên</strong>.
             </p>
           </div>
           <div style="background: #020617; padding: 14px 28px; text-align: center; font-size: 12px; color: #64748b;">
@@ -261,36 +302,15 @@ export async function sendNewAdminCredentialsEmail({ to, fullName, tempPassword 
   }
 }
 
-
 export async function sendPromoteAdminEmail({ to, fullName }) {
-  const host = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
-  const port = Number(process.env.SMTP_PORT || 465);
-  const secure = process.env.SMTP_SECURE
-    ? process.env.SMTP_SECURE === "true"
-    : port === 465;
-  const user = (process.env.SMTP_USER || "").trim();
-  const pass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
-  const from = (process.env.SMTP_FROM || `PTIT ExamPro <${user}>`).trim();
-
-  if (!user || !pass) {
+  if (!isMailerConfigured()) {
     return false;
   }
-
-  const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 20000,
-  });
 
   const safeName = (fullName || "Quản trị viên").replace(/[<>&"]/g, "");
 
   try {
-    await transporter.sendMail({
-      from,
+    await dispatchEmail({
       to,
       subject: "[PTIT ExamPro] Thông báo nâng cấp tài khoản lên Quản trị viên",
       text:
@@ -309,7 +329,7 @@ export async function sendPromoteAdminEmail({ to, fullName }) {
               Tài khoản của bạn (<strong style="color: #f8fafc;">${to}</strong>) vừa được Super Admin nâng cấp lên quyền <strong>Quản trị viên (Admin)</strong> trên hệ thống PTIT ExamPro.
             </p>
             <p style="margin: 0; font-size: 13px; color: #94a3b8;">
-              • Mật khẩu hiện tại của bạn được giữ nguyên. Trong lần đăng nhập đầu tiên với quyền Admin, bạn sẽ cần xác thực OTP và chờ Super Admin phê duyệt.
+- Mật khẩu hiện tại của bạn được giữ nguyên. Trong lần đăng nhập đầu tiên với quyền Admin, bạn sẽ cần xác thực OTP và chờ Super Admin phê duyệt.
             </p>
           </div>
           <div style="background: #020617; padding: 14px 28px; text-align: center; font-size: 12px; color: #64748b;">
