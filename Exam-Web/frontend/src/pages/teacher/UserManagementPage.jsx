@@ -130,13 +130,47 @@ export default function UserManagementPage() {
     setCreatingAdmin(true);
     try {
       const res = await axiosClient.post("/auth/admins", adminForm);
-      setCreatedTempAdmin(res.data?.data || null);
+      if (res.data?.data?.tempPassword) {
+        setCreatedTempAdmin(res.data.data);
+      }
       setAdminForm({ fullName: "", email: "", superAdminPassword: "" });
       showToast(res.data?.message || "Đã tạo Admin mới thành công!", "success");
       loadData();
     } catch (err) {
-      const msg = err.response?.data?.message || "Không thể tạo tài khoản Admin mới.";
-      if (err.response?.data?.forceLogout) {
+      const errData = err.response?.data;
+      if (err.response?.status === 409 && errData?.requirePromoteConfirm) {
+        setCreatingAdmin(false);
+        const ok = await confirmDialog({
+          title: "Xác nhận nâng cấp tài khoản Sinh viên",
+          message: `Email ${errData.email} hiện đang thuộc về tài khoản Sinh viên ${errData.studentName}. Bạn có muốn nâng cấp tài khoản này lên Quản trị viên (giữ nguyên mật khẩu hiện tại) không?`,
+          confirmText: "Xác nhận nâng cấp",
+        });
+        if (!ok) return;
+        setCreatingAdmin(true);
+        try {
+          const promoteRes = await axiosClient.post("/auth/admins", {
+            ...adminForm,
+            confirmPromote: true,
+          });
+          setAdminForm({ fullName: "", email: "", superAdminPassword: "" });
+          showToast(
+            promoteRes.data?.message || "Đã nâng cấp lên Quản trị viên thành công!",
+            "success"
+          );
+          loadData();
+        } catch (promoteErr) {
+          const promoteMsg =
+            promoteErr.response?.data?.message || "Không thể nâng cấp tài khoản.";
+          showToast(promoteMsg, "error");
+          setNotice({ type: "error", text: promoteMsg });
+        } finally {
+          setCreatingAdmin(false);
+        }
+        return;
+      }
+
+      const msg = errData?.message || "Không thể tạo tài khoản Admin mới.";
+      if (errData?.forceLogout) {
         showToast(msg, "error");
         await logout();
         navigate("/login", { replace: true });

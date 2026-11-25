@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import { pool } from "../config/db.js";
 import { isText } from "../utils/validation.js";
 import { invalidateTokenVersionCache } from "../middlewares/authMiddleware.js";
-import { sendNewAdminCredentialsEmail } from "../utils/mailer.js";
+import { sendNewAdminCredentialsEmail, sendPromoteAdminEmail } from "../utils/mailer.js";
 import { parsePtitEmail, KY_THUAT_MAJORS, KINH_TE_MAJORS } from "../utils/ptitHelper.js";
 
 const superAdminPwdFailures = new Map();
@@ -158,7 +158,7 @@ export async function getAdmins(req, res, next) {
 
 export async function createAdmin(req, res, next) {
   try {
-    const { fullName, email, superAdminPassword } = req.body;
+    const { fullName, email, superAdminPassword, confirmPromote } = req.body;
     if (!isText(fullName, 120) || !isText(email, 150) || typeof superAdminPassword !== "string" || !superAdminPassword) {
       return res.status(400).json({
         success: false,
@@ -199,6 +199,69 @@ export async function createAdmin(req, res, next) {
     superAdminPwdFailures.delete(req.user.id);
 
     const normalizedEmail = email.trim().toLowerCase();
+    const [existing] = await pool.query(
+      "SELECT id, full_name, email, role FROM users WHERE email = ?",
+      [normalizedEmail]
+    );
+
+    if (existing.length > 0) {
+      const existingUser = existing[0];
+      if (["TEACHER", "ADMIN", "SUPER_ADMIN"].includes(existingUser.role)) {
+        return res.status(400).json({
+          success: false,
+          message: "Email này đã thuộc về một Quản trị viên trên hệ thống.",
+        });
+      }
+
+      if (existingUser.role === "STUDENT" && !confirmPromote) {
+        return res.status(409).json({
+          success: false,
+          requirePromoteConfirm: true,
+          studentName: existingUser.full_name,
+          email: existingUser.email,
+          message: "Email này đang là tài khoản Sinh viên.",
+        });
+      }
+
+      await pool.query(
+        `UPDATE users
+         SET role = 'TEACHER', is_super_admin = 0,
+             first_login_approved = 0, pending_first_login = 0,
+             must_change_password = 0, token_version = token_version + 1
+         WHERE id = ?`,
+        [existingUser.id]
+      );
+      invalidateTokenVersionCache(existingUser.id);
+
+      await pool.query(
+        `INSERT INTO admin_logs (admin_id, admin_name, action_type, exam_title, subject_code, details)
+         VALUES (?, ?, 'CREATE_ADMIN', ?, NULL, ?)`,
+        [
+          req.user.id,
+          req.user.fullName || "Super Admin",
+          `${existingUser.full_name} (${existingUser.email})`,
+          "Nâng cấp tài khoản Sinh viên lên Quản trị viên (giữ nguyên mật khẩu hiện tại)",
+        ]
+      );
+
+      await sendPromoteAdminEmail({
+        to: existingUser.email,
+        fullName: existingUser.full_name,
+      });
+
+      return res.status(200).json({
+        success: true,
+        promoted: true,
+        message: `Đã nâng cấp tài khoản Sinh viên "${existingUser.full_name}" lên Quản trị viên thành công!`,
+        data: {
+          id: existingUser.id,
+          fullName: existingUser.full_name,
+          email: existingUser.email,
+          promoted: true,
+        },
+      });
+    }
+
     const mxOk = await isValidEmailWithMx(normalizedEmail);
     if (!mxOk) {
       return res.status(400).json({
@@ -211,36 +274,12 @@ export async function createAdmin(req, res, next) {
     const mustChange = 1;
     const passwordHash = await bcrypt.hash(finalPassword, 10);
 
-    const [existing] = await pool.query("SELECT id, role FROM users WHERE email = ?", [
-      normalizedEmail,
-    ]);
-
-    let adminId;
-    if (existing.length > 0) {
-      if (["TEACHER", "ADMIN", "SUPER_ADMIN"].includes(existing[0].role)) {
-        return res.status(409).json({
-          success: false,
-          message: "Email này đã là tài khoản Admin trong hệ thống.",
-        });
-      }
-      adminId = existing[0].id;
-      await pool.query(
-        `UPDATE users
-         SET full_name = ?, role = 'TEACHER', is_super_admin = 0,
-             first_login_approved = 0, pending_first_login = 0,
-             password_hash = ?, must_change_password = ?, token_version = token_version + 1
-         WHERE id = ?`,
-        [fullName.trim(), passwordHash, mustChange, adminId]
-      );
-      invalidateTokenVersionCache(adminId);
-    } else {
-      const [inserted] = await pool.query(
-        `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, first_login_approved, pending_first_login, must_change_password)
-         VALUES (?, ?, ?, 'TEACHER', 0, 0, 0, ?)`,
-        [fullName.trim(), normalizedEmail, passwordHash, mustChange]
-      );
-      adminId = inserted.insertId;
-    }
+    const [inserted] = await pool.query(
+      `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, first_login_approved, pending_first_login, must_change_password)
+       VALUES (?, ?, ?, 'TEACHER', 0, 0, 0, ?)`,
+      [fullName.trim(), normalizedEmail, passwordHash, mustChange]
+    );
+    const adminId = inserted.insertId;
 
     await pool.query(
       `INSERT INTO admin_logs (admin_id, admin_name, action_type, exam_title, subject_code, details)

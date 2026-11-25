@@ -260,3 +260,67 @@ export async function sendNewAdminCredentialsEmail({ to, fullName, tempPassword 
     return false;
   }
 }
+
+
+export async function sendPromoteAdminEmail({ to, fullName }) {
+  const host = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
+  const port = Number(process.env.SMTP_PORT || 465);
+  const secure = process.env.SMTP_SECURE
+    ? process.env.SMTP_SECURE === "true"
+    : port === 465;
+  const user = (process.env.SMTP_USER || "").trim();
+  const pass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
+  const from = (process.env.SMTP_FROM || `PTIT ExamPro <${user}>`).trim();
+
+  if (!user || !pass) {
+    return false;
+  }
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+  });
+
+  const safeName = (fullName || "Quản trị viên").replace(/[<>&"]/g, "");
+
+  try {
+    await transporter.sendMail({
+      from,
+      to,
+      subject: "[PTIT ExamPro] Thông báo nâng cấp tài khoản lên Quản trị viên",
+      text:
+        `Xin chào ${safeName},\n\n` +
+        `Tài khoản Sinh viên của bạn (${to}) vừa được Super Admin nâng cấp lên quyền Quản trị viên (Admin) trên hệ thống PTIT ExamPro.\n` +
+        `Bạn tiếp tục sử dụng mật khẩu hiện tại của mình để đăng nhập và chờ Super Admin phê duyệt trong lần đăng nhập đầu tiên.\n`,
+      html: `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 520px; margin: 0 auto; background: #0f172a; color: #e2e8f0; border-radius: 16px; overflow: hidden; border: 1px solid #1e293b;">
+          <div style="background: linear-gradient(135deg, #e11d48, #2563eb); padding: 24px 28px; text-align: center;">
+            <div style="font-size: 12px; letter-spacing: 2px; font-weight: 700; color: rgba(255,255,255,0.88); text-transform: uppercase;">Học viện Công nghệ Bưu chính Viễn thông</div>
+            <h1 style="margin: 6px 0 0; font-size: 24px; color: #ffffff;">PTIT ExamPro</h1>
+          </div>
+          <div style="padding: 28px;">
+            <p style="margin: 0 0 12px; font-size: 15px;">Xin chào <strong>${safeName}</strong>,</p>
+            <p style="margin: 0 0 18px; font-size: 14px; line-height: 1.6; color: #cbd5e1;">
+              Tài khoản của bạn (<strong style="color: #f8fafc;">${to}</strong>) vừa được Super Admin nâng cấp lên quyền <strong>Quản trị viên (Admin)</strong> trên hệ thống PTIT ExamPro.
+            </p>
+            <p style="margin: 0; font-size: 13px; color: #94a3b8;">
+              • Mật khẩu hiện tại của bạn được giữ nguyên. Trong lần đăng nhập đầu tiên với quyền Admin, bạn sẽ cần xác thực OTP và chờ Super Admin phê duyệt.
+            </p>
+          </div>
+          <div style="background: #020617; padding: 14px 28px; text-align: center; font-size: 12px; color: #64748b;">
+            Email được gửi tự động từ hệ thống PTIT ExamPro. Vui lòng không trả lời email này.
+          </div>
+        </div>
+      `,
+    });
+    return true;
+  } catch (error) {
+    console.error("📧 [Promote Admin Mailer Warning]:", error.code || error.message);
+    return false;
+  }
+}
