@@ -44,23 +44,46 @@ async function getCachedUserAuth(userId) {
 }
 
 export async function verifyToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({
+      success: false,
+      message: "Bạn chưa đăng nhập hoặc thiếu Token xác thực (401 Unauthorized).",
+    });
+  }
+
+  const token = authHeader.split(" ")[1];
+  const secret = process.env.JWT_SECRET;
+  let decoded;
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    decoded = jwt.verify(token, secret);
+  } catch (jwtErr) {
+    if (
+      jwtErr?.name === "JsonWebTokenError" ||
+      jwtErr?.name === "TokenExpiredError" ||
+      jwtErr?.name === "NotBeforeError"
+    ) {
       return res.status(401).json({
         success: false,
-        message: "Bạn chưa đăng nhập hoặc thiếu Token xác thực (401 Unauthorized).",
+        message: "Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại.",
       });
     }
+    return next(jwtErr);
+  }
 
-    const token = authHeader.split(" ")[1];
-    const secret = process.env.JWT_SECRET;
-    const decoded = jwt.verify(token, secret);
-    if (decoded.purpose) {
-      return res.status(401).json({
-        success: false,
-        message: "Token xác thực tạm thời không có quyền truy cập tài nguyên này.",
-      });
+  if (decoded.purpose) {
+    return res.status(401).json({
+      success: false,
+      message: "Token xác thực tạm thời không có quyền truy cập tài nguyên này.",
+    });
+  }
+
+  try {
+    if (tokenVersionCache.size > 500) {
+      const now = Date.now();
+      for (const [k, v] of tokenVersionCache.entries()) {
+        if (v.expiresAt <= now) tokenVersionCache.delete(k);
+      }
     }
 
     const authState = await getCachedUserAuth(decoded.id);
@@ -80,12 +103,9 @@ export async function verifyToken(req, res, next) {
       role: authState.role || decoded.role,
       is_super_admin: authState.is_super_admin,
     };
-    next();
-  } catch (error) {
-    return res.status(401).json({
-      success: false,
-      message: "Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại.",
-    });
+    return next();
+  } catch (dbError) {
+    return next(dbError);
   }
 }
 

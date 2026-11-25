@@ -22,10 +22,20 @@ export const useExamStore = create(persist((set, get) => ({
 
   startExamSession: (examData, userId) => {
     const saved = get();
-    const durationSec = (Number(examData.duration_minutes) || 30) * 60;
+    const baseDurationSec = (Number(examData.duration_minutes) || 30) * 60;
+    const durationSec =
+      Number.isFinite(Number(examData.effective_duration_seconds)) &&
+      Number(examData.effective_duration_seconds) > 0
+        ? Math.min(baseDurationSec, Math.floor(Number(examData.effective_duration_seconds)))
+        : baseDurationSec;
     const parsedServerStart = examData.started_at ? Date.parse(examData.started_at) : NaN;
     const hasServerStart = Number.isFinite(parsedServerStart);
-    const serverDeadline = hasServerStart ? parsedServerStart + durationSec * 1000 : null;
+    const parsedCloseAt = examData.close_at ? Date.parse(examData.close_at) : NaN;
+    const hasCloseAt = Number.isFinite(parsedCloseAt);
+    let serverDeadline = hasServerStart ? parsedServerStart + durationSec * 1000 : null;
+    if (serverDeadline !== null && hasCloseAt) {
+      serverDeadline = Math.min(serverDeadline, parsedCloseAt);
+    }
     const savedIds = (saved.questions || [])
       .map((q) => Number(q.id))
       .sort((a, b) => a - b)
@@ -47,7 +57,10 @@ export const useExamStore = create(persist((set, get) => ({
       savedIds === incomingIds &&
       sameAttemptStart
     ) {
-      const effectiveDeadline = hasServerStart ? serverDeadline : saved.deadline;
+      let effectiveDeadline = hasServerStart ? serverDeadline : saved.deadline;
+      if (hasCloseAt) {
+        effectiveDeadline = Math.min(effectiveDeadline, parsedCloseAt);
+      }
       set({
         deadline: effectiveDeadline,
         activeExam: examData,
@@ -61,9 +74,12 @@ export const useExamStore = create(persist((set, get) => ({
       return;
     }
 
-    const resolvedDeadline = hasServerStart
+    let resolvedDeadline = hasServerStart
       ? serverDeadline
       : Date.now() + durationSec * 1000;
+    if (hasCloseAt) {
+      resolvedDeadline = Math.min(resolvedDeadline, parsedCloseAt);
+    }
     set({
       ownerId: userId,
       deadline: resolvedDeadline,

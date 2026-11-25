@@ -284,6 +284,22 @@ export default function UserManagementPage() {
               onClick={() => setActiveTab("ADMINS")}
             >
               🛡️ Đội ngũ Admin ({admins.length})
+              {pendingFirstLoginAdmins.length > 0 && (
+                <span
+                  style={{
+                    marginLeft: "6px",
+                    padding: "2px 7px",
+                    borderRadius: "999px",
+                    fontSize: "0.75rem",
+                    fontWeight: 700,
+                    background: "#ef4444",
+                    color: "#ffffff",
+                  }}
+                  title="Admin đang chờ phê duyệt lần đăng nhập đầu tiên"
+                >
+                  {pendingFirstLoginAdmins.length}
+                </span>
+              )}
             </button>
           )}
         </div>

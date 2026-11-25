@@ -24,8 +24,8 @@ echo   - Frontend: http://localhost:5173
 echo   - Backend:  http://localhost:5000/api
 echo.
 echo   TAI KHOAN DEMO:
-echo   - Giang vien: teacher@ptit.edu.vn / 123456
-echo   - Sinh vien:  student@ptit.edu.vn / 123456
+echo   - Super Admin: admin@ptit.edu.vn / Admin@123 (OTP: 999999)
+echo   - Sinh vien:   sinhvien@ptit.edu.vn / Student@123
 echo ========================================================
 echo.
 pause

@@ -142,11 +142,13 @@ export async function submitExam(req, res, next) {
       });
     }
 
-    if (attemptRows.length > 0 && attemptRows[0].status === "COMPLETED") {
+    if (!attemptRows.length || attemptRows[0].status !== "IN_PROGRESS") {
       await connection.rollback();
       return res.status(409).json({
         success: false,
-        message: "Lượt làm bài này đã kết thúc hoặc đã được thu bài tự động.",
+        message: !attemptRows.length
+          ? "Bạn chưa bắt đầu lượt làm bài hợp lệ cho đề thi này."
+          : "Lượt làm bài này đã kết thúc hoặc đã được thu bài tự động.",
       });
     }
 
@@ -296,6 +298,7 @@ export async function getSubmissionDetail(req, res, next) {
         e.is_published,
         e.close_at,
         e.max_attempts,
+        e.shuffle_options,
         (e.is_published = 0 OR (e.close_at IS NOT NULL AND e.close_at <= NOW())) AS is_exam_closed,
         s.name AS subject_name,
         s.code AS subject_code,

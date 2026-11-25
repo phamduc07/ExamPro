@@ -6,14 +6,24 @@ import AppRouter from "./router/AppRouter";
 
 export default function App() {
   useEffect(() => {
-    const handleMouseMove = (e) => {
+    let rafId = null;
+    let lastEvent = null;
+
+    const applyPointerEffect = () => {
+      rafId = null;
+      const e = lastEvent;
+      if (!e) return;
       const root = document.documentElement;
       root.style.setProperty("--mouse-x", `${e.clientX}px`);
       root.style.setProperty("--mouse-y", `${e.clientY}px`);
 
-      const card = e.target.closest(
-        ".exam-card, .stat-box, .hero-feature-item, .intro-metric-item, .auth-card"
-      );
+      const target = e.target;
+      const card =
+        target && typeof target.closest === "function"
+          ? target.closest(
+              ".exam-card, .stat-box, .hero-feature-item, .intro-metric-item, .auth-card"
+            )
+          : null;
       if (card) {
         const rect = card.getBoundingClientRect();
         const x = e.clientX - rect.left;
@@ -32,8 +42,20 @@ export default function App() {
       }
     };
 
+    const handleMouseMove = (e) => {
+      lastEvent = e;
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(applyPointerEffect);
+      }
+    };
+
     window.addEventListener("mousemove", handleMouseMove, { passive: true });
-    return () => window.removeEventListener("mousemove", handleMouseMove);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
   }, []);
 
   return (

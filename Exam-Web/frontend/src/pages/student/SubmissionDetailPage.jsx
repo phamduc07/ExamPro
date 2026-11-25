@@ -2,6 +2,20 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
 
+function seededShuffle(items, seedStr) {
+  const arr = [...items];
+  let seed = 0;
+  for (let i = 0; i < seedStr.length; i++) {
+    seed = (seed * 31 + seedStr.charCodeAt(i)) >>> 0;
+  }
+  for (let i = arr.length - 1; i > 0; i--) {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    const j = seed % (i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 export default function SubmissionDetailPage() {
   const { id } = useParams();
   const [detail, setDetail] = useState(null);
@@ -122,12 +136,25 @@ export default function SubmissionDetailPage() {
         <div className="review-list">
           {detail.questions?.map((q, idx) => {
             const isCorrect = q.is_correct;
-            const options = [
+            const baseOptions = [
               { key: "A", text: q.option_a },
               { key: "B", text: q.option_b },
               { key: "C", text: q.option_c },
               { key: "D", text: q.option_d },
             ];
+            const displayLabels = ["A", "B", "C", "D"];
+            const startedAtIso = detail.started_at
+              ? new Date(detail.started_at).toISOString()
+              : "";
+            const options = detail.shuffle_options
+              ? seededShuffle(
+                  baseOptions,
+                  `${detail.exam_id}-${q.id}-${startedAtIso}`
+                )
+              : baseOptions;
+            const selectedIdx = options.findIndex((o) => o.key === q.selected_option);
+            const selectedDisplayLabel =
+              selectedIdx >= 0 ? displayLabels[selectedIdx] : q.selected_option;
 
             return (
               <article
@@ -140,7 +167,7 @@ export default function SubmissionDetailPage() {
                     {isCorrect
                       ? "✓ Trả lời chính xác"
                       : q.selected_option
-                      ? `✕ Chọn sai (Bạn chọn ${q.selected_option})`
+                      ? `✕ Chọn sai (Bạn chọn ${selectedDisplayLabel})`
                       : "✕ Chưa chọn đáp án"}
                   </span>
                 </div>
@@ -148,7 +175,7 @@ export default function SubmissionDetailPage() {
                 <p className="review-q-content">{q.content}</p>
 
                 <div className="review-options-grid">
-                  {options.map((opt) => {
+                  {options.map((opt, optIdx) => {
                     const isRightAns = canViewAnswers && q.correct_answer === opt.key;
                     const isUserSelected = q.selected_option === opt.key;
 
@@ -161,7 +188,7 @@ export default function SubmissionDetailPage() {
 
                     return (
                       <div key={opt.key} className={cls}>
-                        <span className="opt-badge">{opt.key}</span>
+                        <span className="opt-badge">{displayLabels[optIdx] || opt.key}</span>
                         <span className="opt-label">{opt.text}</span>
                         {isRightAns && (
                           <span className="opt-tag-right">✓ Đáp án đúng</span>

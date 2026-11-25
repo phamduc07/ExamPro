@@ -25,8 +25,9 @@ export default function AppRouter() {
       <Route path="/register" element={<RegisterPage />} />
 
       <Route element={<ProtectedRoute />}>
-
-        <Route path="/exam-room/:id" element={<ExamRoomPage />} />
+        <Route element={<ProtectedRoute allowedRole="STUDENT" />}>
+          <Route path="/exam-room/:id" element={<ExamRoomPage />} />
+        </Route>
 
         <Route element={<MainLayout />}>
 

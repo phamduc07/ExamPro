@@ -17,8 +17,13 @@ export default function ProtectedRoute({ allowedRole }) {
     return <Navigate to="/login" replace />;
   }
 
-  if (allowedRole && user.role !== allowedRole) {
-    return <Navigate to="/" replace />;
+  if (allowedRole) {
+    const isTeacherAlias =
+      allowedRole === "TEACHER" &&
+      ["TEACHER", "ADMIN", "SUPER_ADMIN"].includes(user.role);
+    if (user.role !== allowedRole && !isTeacherAlias) {
+      return <Navigate to="/" replace />;
+    }
   }
 
   return <Outlet />;

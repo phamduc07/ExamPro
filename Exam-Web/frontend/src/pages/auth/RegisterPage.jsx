@@ -402,6 +402,7 @@ export default function RegisterPage() {
               </div>
 
               <div className="otp-actions-row">
+                <span className="otp-expire-hint">Mã có hiệu lực trong 60 giây.</span>
                 {cooldown > 0 ? (
                   <span className="otp-cooldown-text">Gửi lại sau {cooldown}s</span>
                 ) : (

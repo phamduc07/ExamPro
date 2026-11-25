@@ -64,6 +64,7 @@ export default function ExamRoomPage() {
   const lastTabSwitchRef = useRef(0);
   const autoSubmitTimerRef = useRef(null);
   const ignoreBlurUntilRef = useRef(0);
+  const handleFinalSubmitRef = useRef(null);
 
   const lockRoomWithModal = useCallback(
     ({
@@ -194,6 +195,23 @@ export default function ExamRoomPage() {
         }
         submitLockRef.current = false;
         setSubmitting(false);
+        const status = err.response?.status;
+        if (isAuto && autoReason === "timeout" && (!status || status >= 500)) {
+          showToast(
+            "Mất kết nối khi tự động nộp bài. Hệ thống sẽ thử gửi lại sau 3 giây...",
+            "warning"
+          );
+          if (autoSubmitTimerRef.current) {
+            clearTimeout(autoSubmitTimerRef.current);
+          }
+          autoSubmitTimerRef.current = setTimeout(() => {
+            autoSubmitTimerRef.current = null;
+            if (handleFinalSubmitRef.current) {
+              handleFinalSubmitRef.current(true, "timeout");
+            }
+          }, 3000);
+          return;
+        }
         showToast(
           err.response?.data?.message || "Lỗi khi nộp bài. Vui lòng thử lại.",
           "error"
@@ -202,6 +220,10 @@ export default function ExamRoomPage() {
     },
     [id, navigate, resetExamSession, showToast, lockRoomWithModal]
   );
+
+  useEffect(() => {
+    handleFinalSubmitRef.current = handleFinalSubmit;
+  }, [handleFinalSubmit]);
 
   useEffect(() => {
     if (loading || !activeExam || questions.length === 0 || violationModal) return;

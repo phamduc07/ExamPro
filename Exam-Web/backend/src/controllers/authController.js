@@ -220,7 +220,7 @@ export async function register(req, res, next) {
       await pool.query("DELETE FROM email_otps WHERE id = ?", [otpRow.id]);
       return res.status(400).json({
         success: false,
-        message: "Mã OTP đã hết hạn (quá 5 phút). Vui lòng gửi lại mã OTP mới.",
+        message: "Mã OTP đã hết hạn (quá 60 giây). Vui lòng gửi lại mã OTP mới.",
       });
     }
 
@@ -1027,7 +1027,7 @@ export async function resetPassword(req, res, next) {
     await pool.query("UPDATE password_resets SET used = 1 WHERE email = ?", [normalizedEmail]);
     await pool.query(
       `UPDATE users
-       SET password_hash = ?, token_version = token_version + 1,
+       SET password_hash = ?, must_change_password = 0, token_version = token_version + 1,
            failed_login_attempts = 0, locked_until = NULL
        WHERE email = ?`,
       [nextHash, normalizedEmail]

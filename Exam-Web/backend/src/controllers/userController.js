@@ -105,7 +105,7 @@ export async function unlockUser(req, res, next) {
     }
 
     const [rows] = await pool.query(
-      `SELECT id, full_name, email, student_code
+      `SELECT id, full_name, email, role, student_code
        FROM users
        WHERE LOWER(email) = LOWER(?) OR UPPER(student_code) = UPPER(?)
        LIMIT 1`,
@@ -119,8 +119,15 @@ export async function unlockUser(req, res, next) {
     }
 
     const target = rows[0];
+    if (target.role !== "STUDENT") {
+      return res.status(403).json({
+        success: false,
+        message: "Chỉ được phép mở khóa cho tài khoản Sinh viên.",
+      });
+    }
+
     await pool.query(
-      "UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?",
+      "UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ? AND role = 'STUDENT'",
       [target.id]
     );
 
@@ -333,9 +340,15 @@ export async function deleteAdmin(req, res, next) {
         message: "Không thể xóa tài khoản Super Admin gốc.",
       });
     }
+    if (target.role !== "TEACHER") {
+      return res.status(403).json({
+        success: false,
+        message: "Chỉ được phép xóa tài khoản Quản trị viên thường.",
+      });
+    }
 
     await pool.query("DELETE FROM login_otps WHERE user_id = ?", [targetId]);
-    await pool.query("DELETE FROM users WHERE id = ?", [targetId]);
+    await pool.query("DELETE FROM users WHERE id = ? AND role = 'TEACHER' AND is_super_admin = 0", [targetId]);
     invalidateTokenVersionCache(targetId);
 
     await pool.query(
@@ -414,7 +427,7 @@ export async function revokeAdmin(req, res, next) {
   try {
     const targetId = Number(req.params.id);
     const [rows] = await pool.query(
-      "SELECT id, full_name, email, role, is_super_admin FROM users WHERE id = ?",
+      "SELECT id, full_name, email, role, is_super_admin, student_code, major_group FROM users WHERE id = ?",
       [targetId]
     );
     if (!rows.length) {
@@ -431,11 +444,23 @@ export async function revokeAdmin(req, res, next) {
       });
     }
 
+    const parsedEmailInfo = parsePtitEmail(target.email || "");
+    const preservedStudentCode =
+      target.student_code || (parsedEmailInfo.isValid ? parsedEmailInfo.studentId : null);
+    const preservedMajorGroup =
+      target.major_group || (parsedEmailInfo.isValid ? parsedEmailInfo.majorGroup : null);
+
     await pool.query(
       `UPDATE users
-       SET role = 'STUDENT', is_super_admin = 0, token_version = token_version + 1
+       SET role = 'STUDENT',
+           is_super_admin = 0,
+           first_login_approved = 0,
+           pending_first_login = 0,
+           student_code = ?,
+           major_group = ?,
+           token_version = token_version + 1
        WHERE id = ?`,
-      [targetId]
+      [preservedStudentCode, preservedMajorGroup, targetId]
     );
     invalidateTokenVersionCache(targetId);
 

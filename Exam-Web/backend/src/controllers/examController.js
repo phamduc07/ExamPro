@@ -289,6 +289,8 @@ export async function getExamById(req, res, next) {
 
     let currentTabSwitchCount = 0;
     let activeStartedAt = null;
+    const baseDurationSec = (Number(exam.duration_minutes) || 30) * 60;
+    let effectiveDurationSeconds = baseDurationSec;
     if (req.user?.role === "STUDENT") {
       const nowDate = new Date();
       await pool.query(
@@ -311,6 +313,14 @@ export async function getExamById(req, res, next) {
       if (activeAttempt[0]?.started_at) {
         activeStartedAt = new Date(activeAttempt[0].started_at).toISOString();
       }
+      if (exam.close_at) {
+        const closeAtMs = new Date(exam.close_at).getTime();
+        const startMs = activeStartedAt ? new Date(activeStartedAt).getTime() : Date.now();
+        if (Number.isFinite(closeAtMs) && Number.isFinite(startMs)) {
+          const remainingToCloseSec = Math.max(1, Math.floor((closeAtMs - startMs) / 1000));
+          effectiveDurationSeconds = Math.min(baseDurationSec, remainingToCloseSec);
+        }
+      }
     }
 
     return res.status(200).json({
@@ -321,6 +331,7 @@ export async function getExamById(req, res, next) {
         submission_count: submissionCount,
         my_attempt_count: myAttemptCount,
         started_at: activeStartedAt,
+        effective_duration_seconds: effectiveDurationSeconds,
         current_tab_switch_count: currentTabSwitchCount,
         questions: formattedQuestions,
       },

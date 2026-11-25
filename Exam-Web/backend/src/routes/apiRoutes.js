@@ -65,9 +65,13 @@ const router = express.Router();
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
-  keyGenerator: (req) =>
-    req.body?.email ? String(req.body.email).trim().toLowerCase() : req.ip,
-  validate: { keyGeneratorIpFallback: false },
+  keyGenerator: (req) => {
+    const emailPart = req.body?.email
+      ? String(req.body.email).trim().toLowerCase()
+      : "";
+    return `${req.ip || "unknown"}_${emailPart}`;
+  },
+  validate: false,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -76,9 +80,22 @@ const authLimiter = rateLimit({
   },
 });
 
+const approvalPollLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 360,
+  validate: false,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Quá nhiều yêu cầu kiểm tra trạng thái phê duyệt. Vui lòng thử lại sau.",
+  },
+});
+
 const chatLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
+  validate: false,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -87,18 +104,18 @@ const chatLimiter = rateLimit({
   },
 });
 
-router.post("/auth/register/send-otp", sendRegisterOtp);
-router.post("/auth/send-otp", sendRegisterOtp);
-router.post("/auth/register", register);
+router.post("/auth/register/send-otp", authLimiter, sendRegisterOtp);
+router.post("/auth/send-otp", authLimiter, sendRegisterOtp);
+router.post("/auth/register", authLimiter, register);
 router.post("/auth/login", authLimiter, login);
-router.post("/auth/login/verify-otp", verifyAdminLoginOtp);
-router.post("/auth/login/resend-otp", resendAdminLoginOtp);
-router.post("/auth/login/check-approval", checkAdminApprovalStatus);
+router.post("/auth/login/verify-otp", authLimiter, verifyAdminLoginOtp);
+router.post("/auth/login/resend-otp", authLimiter, resendAdminLoginOtp);
+router.post("/auth/login/check-approval", approvalPollLimiter, checkAdminApprovalStatus);
 router.post("/auth/forgot-password", authLimiter, forgotPassword);
-router.post("/auth/reset-password", resetPassword);
+router.post("/auth/reset-password", authLimiter, resetPassword);
 router.post("/auth/logout", verifyToken, logout);
 router.post("/auth/change-password", verifyToken, changePassword);
-router.post("/auth/force-change-password", forceChangePassword);
+router.post("/auth/force-change-password", authLimiter, forceChangePassword);
 router.get("/auth/students", verifyToken, requireRole("TEACHER"), getStudentsForAdmin);
 router.patch("/auth/unlock-user", verifyToken, requireRole("TEACHER"), unlockUser);
 router.get("/auth/admins", verifyToken, requireSuperAdmin, getAdmins);
@@ -134,7 +151,7 @@ router.put("/exams/:id", verifyToken, requireRole("TEACHER"), updateExam);
 router.patch("/exams/:id/reopen", verifyToken, requireRole("TEACHER"), reopenExam);
 router.delete("/exams/:id", verifyToken, requireRole("TEACHER"), deleteExam);
 
-router.post("/submissions", verifyToken, submitExam);
+router.post("/submissions", verifyToken, requireRole("STUDENT"), submitExam);
 router.post("/submissions/suspend", verifyToken, requireRole("TEACHER"), suspendSubmission);
 router.post("/submissions/unsuspend", verifyToken, requireRole("TEACHER"), unsuspendSubmission);
 router.get("/submissions/my-history", verifyToken, getMySubmissions);
