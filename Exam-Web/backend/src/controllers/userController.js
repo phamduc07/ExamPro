@@ -1,9 +1,27 @@
 import crypto from "node:crypto";
+import dns from "node:dns/promises";
 import bcrypt from "bcryptjs";
 import { pool } from "../config/db.js";
 import { isText } from "../utils/validation.js";
 import { invalidateTokenVersionCache } from "../middlewares/authMiddleware.js";
+import { sendNewAdminCredentialsEmail } from "../utils/mailer.js";
 import { parsePtitEmail, KY_THUAT_MAJORS, KINH_TE_MAJORS } from "../utils/ptitHelper.js";
+
+const superAdminPwdFailures = new Map();
+const MAX_SUPER_ADMIN_CONFIRM_FAILS = 5;
+
+async function isValidEmailWithMx(email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  const basicRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+  if (!basicRegex.test(normalized)) return false;
+  const domain = normalized.split("@")[1];
+  try {
+    const records = await dns.resolveMx(domain);
+    return Array.isArray(records) && records.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 function generateStrongTempPassword() {
   const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -124,10 +142,10 @@ export async function unlockUser(req, res, next) {
 export async function getAdmins(req, res, next) {
   try {
     const [rows] = await pool.query(`
-      SELECT id, full_name, email, role, is_super_admin, must_change_password, locked_until, created_at
+      SELECT id, full_name, email, role, is_super_admin, first_login_approved, pending_first_login, must_change_password, locked_until, created_at
       FROM users
       WHERE role IN ('TEACHER', 'ADMIN', 'SUPER_ADMIN')
-      ORDER BY is_super_admin DESC, id ASC
+      ORDER BY pending_first_login DESC, is_super_admin DESC, id ASC
     `);
     return res.status(200).json({
       success: true,
@@ -158,17 +176,40 @@ export async function createAdmin(req, res, next) {
         message: "Chỉ Super Admin mới có quyền thêm Admin mới.",
       });
     }
+
     const superPassOk = await bcrypt.compare(superAdminPassword, superRows[0].password_hash);
     if (!superPassOk) {
-      return res.status(401).json({
+      const nextFails = (superAdminPwdFailures.get(req.user.id) || 0) + 1;
+      if (nextFails > MAX_SUPER_ADMIN_CONFIRM_FAILS) {
+        superAdminPwdFailures.delete(req.user.id);
+        return res.status(400).json({
+          success: false,
+          forceLogout: true,
+          message: "Bạn đã nhập sai mật khẩu quá 5 lần. Hệ thống tự động đăng xuất.",
+        });
+      }
+      superAdminPwdFailures.set(req.user.id, nextFails);
+      const remaining = MAX_SUPER_ADMIN_CONFIRM_FAILS - nextFails;
+      return res.status(400).json({
         success: false,
-        message: "Mật khẩu xác nhận của Super Admin không chính xác.",
+        remainingAttempts: remaining,
+        message: `Mật khẩu bạn nhập sai (Còn ${remaining}/${MAX_SUPER_ADMIN_CONFIRM_FAILS} lần thử)`,
+      });
+    }
+    superAdminPwdFailures.delete(req.user.id);
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const mxOk = await isValidEmailWithMx(normalizedEmail);
+    if (!mxOk) {
+      return res.status(400).json({
+        success: false,
+        message: "Email không tồn tại hoặc không hợp lệ",
       });
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
-    const tempPassword = generateStrongTempPassword();
-    const tempHash = await bcrypt.hash(tempPassword, 10);
+    const finalPassword = generateStrongTempPassword();
+    const mustChange = 1;
+    const passwordHash = await bcrypt.hash(finalPassword, 10);
 
     const [existing] = await pool.query("SELECT id, role FROM users WHERE email = ?", [
       normalizedEmail,
@@ -186,16 +227,17 @@ export async function createAdmin(req, res, next) {
       await pool.query(
         `UPDATE users
          SET full_name = ?, role = 'TEACHER', is_super_admin = 0,
-             password_hash = ?, must_change_password = 1, token_version = token_version + 1
+             first_login_approved = 0, pending_first_login = 0,
+             password_hash = ?, must_change_password = ?, token_version = token_version + 1
          WHERE id = ?`,
-        [fullName.trim(), tempHash, adminId]
+        [fullName.trim(), passwordHash, mustChange, adminId]
       );
       invalidateTokenVersionCache(adminId);
     } else {
       const [inserted] = await pool.query(
-        `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, must_change_password)
-         VALUES (?, ?, ?, 'TEACHER', 0, 1)`,
-        [fullName.trim(), normalizedEmail, tempHash]
+        `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, first_login_approved, pending_first_login, must_change_password)
+         VALUES (?, ?, ?, 'TEACHER', 0, 0, 0, ?)`,
+        [fullName.trim(), normalizedEmail, passwordHash, mustChange]
       );
       adminId = inserted.insertId;
     }
@@ -207,19 +249,122 @@ export async function createAdmin(req, res, next) {
         req.user.id,
         req.user.fullName || "Super Admin",
         `${fullName.trim()} (${normalizedEmail})`,
-        "Cấp quyền Admin mới (bắt buộc đổi mật khẩu lần đầu)",
+        "Cấp quyền Admin mới (yêu cầu Super Admin duyệt lần đăng nhập đầu tiên)",
       ]
     );
 
+    await sendNewAdminCredentialsEmail({
+      to: normalizedEmail,
+      fullName: fullName.trim(),
+      tempPassword: finalPassword,
+    });
+
     return res.status(201).json({
       success: true,
-      message: "Đã tạo tài khoản Admin mới thành công! Hãy sao chép mật khẩu tạm thời bên dưới.",
+      message: "Đã tạo tài khoản Admin mới và gửi mật khẩu tạm thời qua email!",
       data: {
         id: adminId,
         fullName: fullName.trim(),
         email: normalizedEmail,
-        tempPassword,
+        tempPassword: finalPassword,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function deleteAdmin(req, res, next) {
+  try {
+    const targetId = Number(req.params.id);
+    const [rows] = await pool.query(
+      "SELECT id, full_name, email, role, is_super_admin FROM users WHERE id = ?",
+      [targetId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy tài khoản Admin.",
+      });
+    }
+    const target = rows[0];
+    if (Number(target.is_super_admin) === 1) {
+      return res.status(403).json({
+        success: false,
+        message: "Không thể xóa tài khoản Super Admin gốc.",
+      });
+    }
+
+    await pool.query("DELETE FROM login_otps WHERE user_id = ?", [targetId]);
+    await pool.query("DELETE FROM users WHERE id = ?", [targetId]);
+    invalidateTokenVersionCache(targetId);
+
+    await pool.query(
+      `INSERT INTO admin_logs (admin_id, admin_name, action_type, exam_title, subject_code, details)
+       VALUES (?, ?, 'REVOKE_ADMIN', ?, NULL, ?)`,
+      [
+        req.user.id,
+        req.user.fullName || "Super Admin",
+        `${target.full_name} (${target.email})`,
+        "Xóa tài khoản Admin khỏi hệ thống",
+      ]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Đã xóa tài khoản Admin ${target.full_name} thành công!`,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function approveAdminFirstLogin(req, res, next) {
+  try {
+    const targetId = Number(req.params.id);
+    const [rows] = await pool.query(
+      "SELECT id, full_name, email FROM users WHERE id = ? AND role IN ('TEACHER', 'ADMIN')",
+      [targetId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy tài khoản Admin.",
+      });
+    }
+    await pool.query(
+      "UPDATE users SET first_login_approved = 1, pending_first_login = 0 WHERE id = ?",
+      [targetId]
+    );
+    return res.status(200).json({
+      success: true,
+      message: `Đã phê duyệt cho phép Admin ${rows[0].full_name} đăng nhập!`,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function rejectAdminFirstLogin(req, res, next) {
+  try {
+    const targetId = Number(req.params.id);
+    const [rows] = await pool.query(
+      "SELECT id, full_name, email FROM users WHERE id = ? AND role IN ('TEACHER', 'ADMIN')",
+      [targetId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy tài khoản Admin.",
+      });
+    }
+    await pool.query(
+      "UPDATE users SET pending_first_login = 0 WHERE id = ?",
+      [targetId]
+    );
+    return res.status(200).json({
+      success: true,
+      message: `Đã từ chối yêu cầu đăng nhập lần đầu của Admin ${rows[0].full_name}.`,
     });
   } catch (error) {
     next(error);

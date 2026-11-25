@@ -8,17 +8,13 @@ import {
   verifyEmailExists,
 } from "../utils/mailer.js";
 
-export const OTP_EXPIRE_MINUTES = 5;
+export const OTP_EXPIRE_MINUTES = 1;
 export const OTP_COOLDOWN_SECONDS = 60;
 export const OTP_MAX_ATTEMPTS = 5;
 export const DEMO_SUPER_ADMIN_OTP = "999999";
 
 export function isDemoSuperAdminEmail(email) {
-  const demoAdminEmail = (process.env.ADMIN_EMAIL || "admin@ptit.edu.vn")
-    .trim()
-    .toLowerCase();
-  const normalized = String(email || "").trim().toLowerCase();
-  return normalized === "admin@ptit.edu.vn" || normalized === demoAdminEmail;
+  return String(email || "").trim().toLowerCase() === "admin@ptit.edu.vn";
 }
 
 export function generateNumericOtp() {

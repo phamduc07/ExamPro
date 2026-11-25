@@ -187,3 +187,76 @@ async function sendOtpMailInternal({ to, fullName, otp, expiresMinutes = 5, subj
     );
   }
 }
+
+
+export async function sendNewAdminCredentialsEmail({ to, fullName, tempPassword }) {
+  const host = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
+  const port = Number(process.env.SMTP_PORT || 465);
+  const secure = process.env.SMTP_SECURE
+    ? process.env.SMTP_SECURE === "true"
+    : port === 465;
+  const user = (process.env.SMTP_USER || "").trim();
+  const pass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
+  const from = (process.env.SMTP_FROM || `PTIT ExamPro <${user}>`).trim();
+
+  if (!user || !pass) {
+    return false;
+  }
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+  });
+
+  const safeName = (fullName || "Quản trị viên").replace(/[<>&"]/g, "");
+
+  try {
+    await transporter.sendMail({
+      from,
+      to,
+      subject: "[PTIT ExamPro] Thông báo cấp quyền Quản trị viên & Mật khẩu tạm thời",
+      text:
+        `Xin chào ${safeName},\n\n` +
+        `Bạn vừa được Super Admin cấp quyền Quản trị viên (Admin) trên hệ thống PTIT ExamPro.\n` +
+        `Email đăng nhập: ${to}\n` +
+        `Mật khẩu tạm thời: ${tempPassword}\n\n` +
+        `Lưu ý: Bạn bắt buộc phải đổi mật khẩu cá nhân ngay trong lần đăng nhập đầu tiên và chờ Super Admin phê duyệt sau khi xác thực OTP.\n`,
+      html: `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 520px; margin: 0 auto; background: #0f172a; color: #e2e8f0; border-radius: 16px; overflow: hidden; border: 1px solid #1e293b;">
+          <div style="background: linear-gradient(135deg, #e11d48, #2563eb); padding: 24px 28px; text-align: center;">
+            <div style="font-size: 12px; letter-spacing: 2px; font-weight: 700; color: rgba(255,255,255,0.88); text-transform: uppercase;">Học viện Công nghệ Bưu chính Viễn thông</div>
+            <h1 style="margin: 6px 0 0; font-size: 24px; color: #ffffff;">PTIT ExamPro</h1>
+          </div>
+          <div style="padding: 28px;">
+            <p style="margin: 0 0 12px; font-size: 15px;">Xin chào <strong>${safeName}</strong>,</p>
+            <p style="margin: 0 0 18px; font-size: 14px; line-height: 1.6; color: #cbd5e1;">
+              Bạn vừa được Super Admin cấp quyền <strong>Quản trị viên (Admin)</strong> trên hệ thống PTIT ExamPro.
+            </p>
+            <div style="background: #1e293b; border: 1px dashed #38bdf8; border-radius: 12px; padding: 18px; text-align: center; margin: 20px 0;">
+              <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 6px;">Mật khẩu tạm thời</div>
+              <div style="font-size: 24px; font-weight: 800; letter-spacing: 2px; color: #38bdf8; font-family: Consolas, monospace;">${tempPassword}</div>
+            </div>
+            <p style="margin: 0 0 8px; font-size: 13px; color: #94a3b8;">
+              • Email đăng nhập: <strong style="color: #f8fafc;">${to}</strong>
+            </p>
+            <p style="margin: 0; font-size: 13px; color: #94a3b8;">
+              • Bạn bắt buộc phải <strong style="color: #f8fafc;">đổi mật khẩu cá nhân ngay trong lần đăng nhập đầu tiên</strong>.
+            </p>
+          </div>
+          <div style="background: #020617; padding: 14px 28px; text-align: center; font-size: 12px; color: #64748b;">
+            Email được gửi tự động từ hệ thống PTIT ExamPro. Vui lòng không trả lời email này.
+          </div>
+        </div>
+      `,
+    });
+    return true;
+  } catch (error) {
+    console.error("📧 [New Admin Mailer Warning]:", error.code || error.message);
+    return false;
+  }
+}

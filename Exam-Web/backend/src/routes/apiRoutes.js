@@ -7,6 +7,7 @@ import {
   login,
   verifyAdminLoginOtp,
   resendAdminLoginOtp,
+  checkAdminApprovalStatus,
   getMe,
   logout,
   changePassword,
@@ -20,6 +21,9 @@ import {
   getAdmins,
   createAdmin,
   revokeAdmin,
+  deleteAdmin,
+  approveAdminFirstLogin,
+  rejectAdminFirstLogin,
 } from "../controllers/userController.js";
 import { chat } from "../controllers/chatController.js";
 import {
@@ -60,6 +64,9 @@ const router = express.Router();
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
+  keyGenerator: (req) =>
+    req.body?.email ? String(req.body.email).trim().toLowerCase() : req.ip,
+  validate: { keyGeneratorIpFallback: false },
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -79,15 +86,14 @@ const chatLimiter = rateLimit({
   },
 });
 
-router.use("/auth", authLimiter);
-
 router.post("/auth/register/send-otp", sendRegisterOtp);
 router.post("/auth/send-otp", sendRegisterOtp);
 router.post("/auth/register", register);
-router.post("/auth/login", login);
+router.post("/auth/login", authLimiter, login);
 router.post("/auth/login/verify-otp", verifyAdminLoginOtp);
 router.post("/auth/login/resend-otp", resendAdminLoginOtp);
-router.post("/auth/forgot-password", forgotPassword);
+router.post("/auth/login/check-approval", checkAdminApprovalStatus);
+router.post("/auth/forgot-password", authLimiter, forgotPassword);
 router.post("/auth/reset-password", resetPassword);
 router.post("/auth/logout", verifyToken, logout);
 router.post("/auth/change-password", verifyToken, changePassword);
@@ -97,6 +103,9 @@ router.patch("/auth/unlock-user", verifyToken, requireRole("TEACHER"), unlockUse
 router.get("/auth/admins", verifyToken, requireSuperAdmin, getAdmins);
 router.post("/auth/admins", verifyToken, requireSuperAdmin, createAdmin);
 router.patch("/auth/admins/:id/revoke", verifyToken, requireSuperAdmin, revokeAdmin);
+router.patch("/auth/admins/:id/approve-first-login", verifyToken, requireSuperAdmin, approveAdminFirstLogin);
+router.patch("/auth/admins/:id/reject-first-login", verifyToken, requireSuperAdmin, rejectAdminFirstLogin);
+router.delete("/users/:id", verifyToken, requireSuperAdmin, deleteAdmin);
 router.get("/auth/me", verifyToken, getMe);
 
 router.post("/chat", chatLimiter, verifyToken, chat);

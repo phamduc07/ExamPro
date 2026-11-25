@@ -600,6 +600,15 @@ async function ensureSchemaColumns() {
     "ALTER TABLE users ADD COLUMN is_super_admin TINYINT(1) NOT NULL DEFAULT 0 AFTER major_group"
   );
   await safeAlter(
+    "ALTER TABLE users ADD COLUMN first_login_approved TINYINT(1) NOT NULL DEFAULT 0 AFTER is_super_admin"
+  );
+  await safeAlter(
+    "ALTER TABLE users ADD COLUMN pending_first_login TINYINT(1) NOT NULL DEFAULT 0 AFTER first_login_approved"
+  );
+  await pool.query(
+    "UPDATE users SET first_login_approved = 1, pending_first_login = 0 WHERE is_super_admin = 1"
+  );
+  await safeAlter(
     "ALTER TABLE users ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0 AFTER is_super_admin"
   );
   await safeAlter(
@@ -701,6 +710,7 @@ async function syncExclusiveAdmin(adminEmail, adminPassword) {
     await pool.query(
       `UPDATE users
        SET full_name = ?, email = ?, password_hash = ?, role = 'TEACHER', is_super_admin = 1,
+           first_login_approved = 1, pending_first_login = 0,
            must_change_password = 0, failed_login_attempts = 0, locked_until = NULL
        WHERE id = ?`,
       ["Quản trị viên Hệ thống (PTIT)", adminEmail, adminHash, target.id]
@@ -733,6 +743,7 @@ async function syncDemoSuperAdmin() {
     await pool.query(
       `UPDATE users
        SET full_name = ?, password_hash = ?, role = 'TEACHER', is_super_admin = 1,
+           first_login_approved = 1, pending_first_login = 0,
            must_change_password = 0, failed_login_attempts = 0, locked_until = NULL
        WHERE id = ?`,
       ["Quản trị viên Hệ thống (PTIT)", adminHash, rows[0].id]

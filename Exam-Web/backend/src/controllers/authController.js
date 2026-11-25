@@ -396,15 +396,10 @@ export async function login(req, res, next) {
 
     if (isAdminAccount) {
       const challengeToken = signAdminOtpChallengeToken(user);
-      const demoAdminEmail = (process.env.ADMIN_EMAIL || "admin@ptit.edu.vn")
-        .trim()
-        .toLowerCase();
-      const lowerUserEmail = user.email.trim().toLowerCase();
-      const isDemoSuperAdmin =
-        lowerUserEmail === "admin@ptit.edu.vn" || lowerUserEmail === demoAdminEmail;
+      const isDemoSuperAdmin = isDemoSuperAdminEmail(user.email);
 
       if (isDemoSuperAdmin) {
-        const demoOtp = "999999";
+        const demoOtp = DEMO_SUPER_ADMIN_OTP;
         const otpHash = await bcrypt.hash(demoOtp, 10);
         await pool.query(
           `INSERT INTO login_otps (user_id, email, otp_hash, expires_at, attempts, last_sent_at)
@@ -422,8 +417,7 @@ export async function login(req, res, next) {
         );
         return res.status(200).json({
           success: true,
-          message:
-            "Tài khoản Demo Super Admin: nhập mã OTP 999999 để hoàn tất đăng nhập (không cần kiểm tra email).",
+          message: "",
           data: {
             requiresOtp: true,
             requires2fa: true,
@@ -431,7 +425,7 @@ export async function login(req, res, next) {
             email: user.email,
             challengeToken,
             expiresInSeconds: OTP_EXPIRE_MINUTES * 60,
-            cooldownSeconds: 0,
+            cooldownSeconds: OTP_COOLDOWN_SECONDS,
           },
         });
       }
@@ -533,14 +527,9 @@ export async function verifyAdminLoginOtp(req, res, next) {
       });
     }
 
-    const demoAdminEmail = (process.env.ADMIN_EMAIL || "admin@ptit.edu.vn")
-      .trim()
-      .toLowerCase();
-    const lowerChallengeEmail = String(challenge.email || "").trim().toLowerCase();
     const isDemoAdminStaticOtp =
-      (lowerChallengeEmail === "admin@ptit.edu.vn" ||
-        lowerChallengeEmail === demoAdminEmail) &&
-      otp.trim() === "999999";
+      isDemoSuperAdminEmail(challenge.email) &&
+      otp.trim() === DEMO_SUPER_ADMIN_OTP;
 
     if (!isDemoAdminStaticOtp) {
       const [otpRows] = await pool.query(
@@ -559,7 +548,7 @@ export async function verifyAdminLoginOtp(req, res, next) {
         await pool.query("DELETE FROM login_otps WHERE id = ?", [otpRow.id]);
         return res.status(400).json({
           success: false,
-          message: "Mã OTP đã hết hạn (quá 5 phút). Vui lòng gửi lại mã mới.",
+          message: "Mã OTP đã hết hạn (quá 60 giây). Vui lòng gửi lại mã mới.",
         });
       }
 
@@ -603,6 +592,31 @@ export async function verifyAdminLoginOtp(req, res, next) {
     const user = userRows[0];
     await pool.query("DELETE FROM login_otps WHERE user_id = ?", [user.id]);
 
+    if (Number(user.is_super_admin) !== 1 && Number(user.first_login_approved) === 0) {
+      await pool.query("UPDATE users SET pending_first_login = 1 WHERE id = ?", [
+        user.id,
+      ]);
+      const approvalToken = jwt.sign(
+        {
+          id: user.id,
+          email: user.email,
+          purpose: "ADMIN_FIRST_LOGIN_APPROVAL",
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: "30m" }
+      );
+      return res.status(200).json({
+        success: true,
+        message: "Đã xác thực OTP. Đang chờ Super Admin phê duyệt lần đăng nhập đầu tiên.",
+        data: {
+          waitingSuperAdminApproval: true,
+          userId: user.id,
+          email: user.email,
+          approvalToken,
+        },
+      });
+    }
+
     if (Number(user.must_change_password) === 1) {
       return res.status(200).json({
         success: true,
@@ -623,6 +637,90 @@ export async function verifyAdminLoginOtp(req, res, next) {
       data: {
         token,
         user: formatUserPayload(user),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function checkAdminApprovalStatus(req, res, next) {
+  try {
+    const { approvalToken } = req.body;
+    if (typeof approvalToken !== "string" || !approvalToken.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Thiếu phiên chờ phê duyệt.",
+      });
+    }
+    let decoded;
+    try {
+      decoded = jwt.verify(approvalToken.trim(), process.env.JWT_SECRET);
+      if (decoded?.purpose !== "ADMIN_FIRST_LOGIN_APPROVAL" || !decoded?.id) {
+        return res.status(401).json({
+          success: false,
+          message: "Phiên chờ phê duyệt không hợp lệ.",
+        });
+      }
+    } catch {
+      return res.status(401).json({
+        success: false,
+        message: "Phiên chờ phê duyệt đã hết hạn. Vui lòng đăng nhập lại.",
+      });
+    }
+
+    const [userRows] = await pool.query(
+      "SELECT * FROM users WHERE id = ? AND (role IN ('TEACHER', 'ADMIN', 'SUPER_ADMIN') OR is_super_admin = 1)",
+      [decoded.id]
+    );
+    if (!userRows.length) {
+      return res.status(403).json({
+        success: false,
+        rejected: true,
+        message: "Tài khoản không còn quyền Quản trị viên.",
+      });
+    }
+
+    const user = userRows[0];
+    if (Number(user.first_login_approved) === 1 || Number(user.is_super_admin) === 1) {
+      if (Number(user.must_change_password) === 1) {
+        return res.status(200).json({
+          success: true,
+          message: "Super Admin đã phê duyệt! Vui lòng đổi mật khẩu cá nhân.",
+          data: {
+            approved: true,
+            requiresPasswordChange: true,
+            mustChangePassword: true,
+            email: user.email,
+            challengeToken: signForceChangePasswordToken(user),
+          },
+        });
+      }
+      return res.status(200).json({
+        success: true,
+        message: "Super Admin đã phê duyệt! Đang chuyển vào hệ thống...",
+        data: {
+          approved: true,
+          token: signUserToken(user),
+          user: formatUserPayload(user),
+        },
+      });
+    }
+
+    if (Number(user.pending_first_login) === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "Super Admin đã từ chối yêu cầu đăng nhập lần đầu của bạn.",
+        data: {
+          rejected: true,
+        },
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        waitingSuperAdminApproval: true,
       },
     });
   } catch (error) {

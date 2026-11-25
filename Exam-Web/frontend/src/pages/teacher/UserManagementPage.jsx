@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
 import { useAuth } from "../../context/AuthContext";
 import { useDialog } from "../../context/DialogContext";
@@ -23,8 +24,9 @@ function formatDateTime(raw) {
 }
 
 export default function UserManagementPage() {
-  const { user } = useAuth();
-  const { confirmDialog } = useDialog();
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const { showToast, confirmDialog } = useDialog();
   const isSuperAdmin = Number(user?.is_super_admin) === 1;
 
   const [activeTab, setActiveTab] = useState("STUDENTS");
@@ -130,20 +132,72 @@ export default function UserManagementPage() {
       const res = await axiosClient.post("/auth/admins", adminForm);
       setCreatedTempAdmin(res.data?.data || null);
       setAdminForm({ fullName: "", email: "", superAdminPassword: "" });
-      setNotice({
-        type: "success",
-        text: `✅ ${res.data?.message || "Đã tạo Admin mới thành công!"}`,
-      });
+      showToast(res.data?.message || "Đã tạo Admin mới thành công!", "success");
       loadData();
     } catch (err) {
-      setNotice({
-        type: "error",
-        text: err.response?.data?.message || "Không thể tạo tài khoản Admin mới.",
-      });
+      const msg = err.response?.data?.message || "Không thể tạo tài khoản Admin mới.";
+      if (err.response?.data?.forceLogout) {
+        showToast(msg, "error");
+        await logout();
+        navigate("/login", { replace: true });
+        return;
+      }
+      showToast(msg, "error");
+      setNotice({ type: "error", text: msg });
     } finally {
       setCreatingAdmin(false);
     }
   };
+
+  const handleDeleteAdmin = async (adm) => {
+    const ok = await confirmDialog({
+      title: "Xóa tài khoản Admin",
+      message: `Bạn chắc chắn muốn xóa vĩnh viễn tài khoản Admin "${adm.full_name}" (${adm.email})?`,
+      confirmText: "🗑️ Xóa Admin",
+      tone: "danger",
+    });
+    if (!ok) return;
+    try {
+      const res = await axiosClient.delete(`/users/${adm.id}`);
+      showToast(res.data?.message || "Đã xóa tài khoản Admin!", "success");
+      loadData();
+    } catch (err) {
+      showToast(err.response?.data?.message || "Không thể xóa tài khoản Admin.", "error");
+    }
+  };
+
+  const handleApproveFirstLogin = async (adm) => {
+    try {
+      const res = await axiosClient.patch(`/auth/admins/${adm.id}/approve-first-login`);
+      showToast(res.data?.message || "Đã phê duyệt đăng nhập lần đầu!", "success");
+      loadData();
+    } catch (err) {
+      showToast(err.response?.data?.message || "Không thể phê duyệt.", "error");
+    }
+  };
+
+  const handleRejectFirstLogin = async (adm) => {
+    try {
+      const res = await axiosClient.patch(`/auth/admins/${adm.id}/reject-first-login`);
+      showToast(res.data?.message || "Đã từ chối yêu cầu đăng nhập.", "warning");
+      loadData();
+    } catch (err) {
+      showToast(err.response?.data?.message || "Không thể từ chối.", "error");
+    }
+  };
+
+  const pendingFirstLoginAdmins = useMemo(
+    () => admins.filter((a) => Number(a.pending_first_login) === 1 && Number(a.first_login_approved) === 0),
+    [admins]
+  );
+
+  useEffect(() => {
+    if (!isSuperAdmin || activeTab !== "ADMINS") return;
+    const timer = setInterval(() => {
+      loadData();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [isSuperAdmin, activeTab, loadData]);
 
   const handleRevokeAdmin = async (adm) => {
     const ok = await confirmDialog({
@@ -448,6 +502,45 @@ export default function UserManagementPage() {
             </form>
           </section>
 
+          {pendingFirstLoginAdmins.length > 0 && (
+            <section className="panel-card compact-panel-card" style={{ marginBottom: "16px", borderColor: "rgba(251, 191, 36, 0.5)" }}>
+              <div className="panel-header">
+                <h2>🔔 Xác nhận cho phép Admin đăng nhập lần đầu ({pendingFirstLoginAdmins.length})</h2>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                {pendingFirstLoginAdmins.map((adm) => (
+                  <div
+                    key={adm.id}
+                    className="zalo-appeal-box"
+                    style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}
+                  >
+                    <div>
+                      <strong style={{ color: "#ffffff" }}>{adm.full_name}</strong>{" "}
+                      <span style={{ color: "#7dd3fc" }}>({adm.email})</span>
+                      <div className="sub-text">Đã xác thực OTP thành công và đang chờ bạn cho phép vào hệ thống.</div>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px" }}>
+                      <button
+                        type="button"
+                        className="btn-sm picker-bank-btn"
+                        onClick={() => handleApproveFirstLogin(adm)}
+                      >
+                        ✅ Cho phép vào
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-sm delete"
+                        onClick={() => handleRejectFirstLogin(adm)}
+                      >
+                        ❌ Từ chối
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
           <section className="panel-card">
             <div className="panel-header">
               <h2>🛡️ Danh sách Đội ngũ Admin ({admins.length})</h2>
@@ -484,13 +577,22 @@ export default function UserManagementPage() {
                           {isRoot ? (
                             <span className="sub-text">Tài khoản gốc</span>
                           ) : (
-                            <button
-                              type="button"
-                              className="btn-sm delete"
-                              onClick={() => handleRevokeAdmin(adm)}
-                            >
-                              Thu hồi quyền
-                            </button>
+                            <div style={{ display: "inline-flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                              <button
+                                type="button"
+                                className="btn-sm edit"
+                                onClick={() => handleRevokeAdmin(adm)}
+                              >
+                                Thu hồi quyền
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-sm delete"
+                                onClick={() => handleDeleteAdmin(adm)}
+                              >
+                                🗑️ Xóa Admin
+                              </button>
+                            </div>
                           )}
                         </td>
                       </tr>

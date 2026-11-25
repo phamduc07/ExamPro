@@ -8,6 +8,7 @@ export default function LoginPage() {
   const {
     login,
     verifyAdminLoginOtp,
+    checkAdminApprovalStatus,
     forceChangePassword,
     resendAdminLoginOtp,
     forgotPassword,
@@ -31,6 +32,7 @@ export default function LoginPage() {
   const [resetConfirmPassword, setResetConfirmPassword] = useState("");
 
   const [otpChallenge, setOtpChallenge] = useState(null);
+  const [approvalPending, setApprovalPending] = useState(null);
   const [forceChangeChallenge, setForceChangeChallenge] = useState(null);
   const [forceNewPassword, setForceNewPassword] = useState("");
   const [forceConfirmPassword, setForceConfirmPassword] = useState("");
@@ -52,6 +54,51 @@ export default function LoginPage() {
     }
   }, [otpChallenge]);
 
+  useEffect(() => {
+    if (!approvalPending?.approvalToken) return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const res = await checkAdminApprovalStatus(approvalPending.approvalToken);
+        if (!active) return;
+        if (res?.approved) {
+          if (res.requiresPasswordChange) {
+            setApprovalPending(null);
+            setForceChangeChallenge({
+              email: res.email,
+              challengeToken: res.challengeToken,
+            });
+            setSuccessMessage(
+              res.message || "Super Admin đã phê duyệt! Vui lòng đổi mật khẩu cá nhân."
+            );
+          } else {
+            navigate("/", { replace: true });
+          }
+        } else if (res?.rejected) {
+          setApprovalPending(null);
+          setSuccessMessage("");
+          setError(
+            res.message || "Super Admin đã từ chối yêu cầu đăng nhập lần đầu của bạn."
+          );
+        }
+      } catch (err) {
+        if (!active) return;
+        if (err.response?.status === 401 || err.response?.status === 403) {
+          setApprovalPending(null);
+          setSuccessMessage("");
+          setError(
+            err.response?.data?.message || "Phiên chờ phê duyệt đã kết thúc. Vui lòng đăng nhập lại."
+          );
+        }
+      }
+    };
+    const timer = setInterval(poll, 3000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [approvalPending, checkAdminApprovalStatus, navigate]);
+
   if (isAuthenticated) {
     return <Navigate to="/" replace />;
   }
@@ -69,10 +116,8 @@ export default function LoginPage() {
           challengeToken: result.challengeToken,
         });
         setOtpDigits(Array(OTP_LENGTH).fill(""));
-        setCooldown(result.cooldownSeconds ?? 60);
-        setSuccessMessage(
-          result.message || "Đã gửi mã OTP xác thực đăng nhập Admin tới Gmail của bạn."
-        );
+        setCooldown(result.cooldownSeconds || 60);
+        setSuccessMessage("");
       } else {
         navigate("/");
       }
@@ -157,7 +202,17 @@ export default function LoginPage() {
     setSubmitting(true);
     try {
       const result = await verifyAdminLoginOtp(otpChallenge.challengeToken, otpCode);
-      if (result?.requiresPasswordChange) {
+      if (result?.waitingSuperAdminApproval) {
+        setOtpChallenge(null);
+        setApprovalPending({
+          email: result.email,
+          approvalToken: result.approvalToken,
+        });
+        setSuccessMessage(
+          result.message ||
+            "Đã xác thực OTP. Đang chờ Super Admin phê duyệt lần đăng nhập đầu tiên."
+        );
+      } else if (result?.requiresPasswordChange) {
         setOtpChallenge(null);
         setForceChangeChallenge({
           email: result.email,
@@ -344,7 +399,31 @@ export default function LoginPage() {
           )}
           {error && <div className="alert-box alert-error">⚠️ {error}</div>}
 
-          {forceChangeChallenge ? (
+          {approvalPending ? (
+            <div className="auth-form" style={{ alignItems: "center", textAlign: "center", padding: "12px 0" }}>
+              <div className="spinner" />
+              <div className="otp-email-banner" style={{ width: "100%", textAlign: "left" }}>
+                <div>
+                  <span className="otp-email-label">⏳ Chờ Super Admin phê duyệt lần đăng nhập đầu tiên</span>
+                  <strong>{approvalPending.email}</strong>
+                </div>
+              </div>
+              <p style={{ color: "var(--text-secondary)", fontSize: "0.9rem" }}>
+                Hệ thống đang tự động kiểm tra trạng thái phê duyệt mỗi 3 giây. Ngay khi Super Admin bấm cho phép, bạn sẽ được chuyển thẳng vào trang quản trị.
+              </p>
+              <button
+                type="button"
+                className="btn-secondary btn-full"
+                onClick={() => {
+                  setApprovalPending(null);
+                  setSuccessMessage("");
+                  setError("");
+                }}
+              >
+                ← Quay lại đăng nhập
+              </button>
+            </div>
+          ) : forceChangeChallenge ? (
             <form onSubmit={handleForceChangeSubmit} className="auth-form">
               <div className="otp-email-banner">
                 <div>
@@ -553,7 +632,7 @@ export default function LoginPage() {
               </div>
 
               <div className="otp-actions-row">
-                <span className="otp-expire-hint">Mã có hiệu lực trong 5 phút.</span>
+                <span className="otp-expire-hint">Mã có hiệu lực trong 60 giây.</span>
                 {cooldown > 0 ? (
                   <span className="otp-cooldown-text">Gửi lại sau {cooldown}s</span>
                 ) : (

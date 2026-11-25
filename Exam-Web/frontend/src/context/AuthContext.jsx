@@ -50,6 +50,15 @@ export function AuthProvider({ children }) {
   const verifyAdminLoginOtp = async (challengeToken, otp) => {
     const res = await axiosClient.post("/auth/login/verify-otp", { challengeToken, otp });
     const data = res.data.data;
+    if (data?.waitingSuperAdminApproval) {
+      return {
+        waitingSuperAdminApproval: true,
+        userId: data.userId,
+        email: data.email,
+        approvalToken: data.approvalToken,
+        message: res.data.message,
+      };
+    }
     if (data?.requiresPasswordChange) {
       return {
         requiresPasswordChange: true,
@@ -62,6 +71,16 @@ export function AuthProvider({ children }) {
     localStorage.setItem("ptit_exam_token", token);
     setUser(loggedUser);
     return { requiresPasswordChange: false, user: loggedUser };
+  };
+
+  const checkAdminApprovalStatus = async (approvalToken) => {
+    const res = await axiosClient.post("/auth/login/check-approval", { approvalToken });
+    const data = res.data.data || {};
+    if (data.approved && data.token && data.user) {
+      localStorage.setItem("ptit_exam_token", data.token);
+      setUser(data.user);
+    }
+    return { ...data, message: res.data.message };
   };
 
   const forceChangePassword = async (challengeToken, newPassword) => {
@@ -118,8 +137,8 @@ export function AuthProvider({ children }) {
     } catch {
 
     } finally {
-      useExamStore.getState().resetExamSession();
       localStorage.removeItem("ptit_exam_token");
+      useExamStore.getState().resetExamSession();
       setUser(null);
     }
   };
@@ -132,6 +151,7 @@ export function AuthProvider({ children }) {
         isAuthenticated: Boolean(user),
         login,
         verifyAdminLoginOtp,
+        checkAdminApprovalStatus,
         forceChangePassword,
         resendAdminLoginOtp,
         sendRegisterOtp,
