@@ -333,12 +333,12 @@ export default function MyResultsPage() {
                                   </span>
                                 </td>
                                 <td style={{ textAlign: "right" }}>
-                                  <Link
-                                    to={`/results/${item.id}`}
-                                    className="btn-table-action"
-                                  >
-                                    Xem đáp án →
-                                  </Link>
+                                    <Link
+                                      to={`/results/${item.id}`}
+                                      className="btn-table-action"
+                                    >
+                                      {Boolean(Number(item.anti_cheat)) ? "Xem kết quả →" : "Xem đáp án →"}
+                                    </Link>
                                 </td>
                               </tr>
                             );

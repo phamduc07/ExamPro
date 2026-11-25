@@ -61,7 +61,8 @@ export default function SubmissionDetailPage() {
   const isSuspended =
     Number(detail.is_suspended) === 1 || Boolean(detail.suspend_reason);
   const passed = !isSuspended && score >= Number(detail.pass_score ?? 5);
-  const canViewAnswers = detail.can_view_answers !== false;
+  const hideDetails =
+    Boolean(detail.hideDetails) || Boolean(Number(detail.anti_cheat));
   const accuracy =
     detail.total_questions > 0
       ? Math.round((detail.correct_count / detail.total_questions) * 100)
@@ -128,96 +129,100 @@ export default function SubmissionDetailPage() {
       </section>
 
       <section className="review-questions-section">
-        <h2 className="section-title-heading">
-          Chi tiết bài làm ({detail.questions?.length || 0} câu)
-        </h2>
-
-        {!canViewAnswers && (
-          <div className="alert-box alert-warning" style={{ marginBottom: "16px" }}>
-            🔒 Đề thi hiện vẫn đang mở và bạn còn lượt làm bài nên đáp án đúng và lời giải chi tiết tạm thời được ẩn.
+        {hideDetails ? (
+          <div className="panel-card" style={{ textAlign: "center", padding: "28px 24px" }}>
+            <div style={{ fontSize: "1.8rem", marginBottom: "8px" }}>🛡️</div>
+            <p style={{ margin: 0, color: "var(--text-main)", fontWeight: 600 }}>
+              Đề thi áp dụng chế độ chống gian lận (Anti-Cheat) nên hệ thống chỉ hiển thị điểm số và bảo mật toàn bộ nội dung câu hỏi, đáp án.
+            </p>
           </div>
-        )}
+        ) : (
+          <>
+            <h2 className="section-title-heading">
+              Chi tiết bài làm ({detail.questions?.length || 0} câu)
+            </h2>
 
-        <div className="review-list">
-          {detail.questions?.map((q, idx) => {
-            const isCorrect = q.is_correct;
-            const baseOptions = [
-              { key: "A", text: q.option_a },
-              { key: "B", text: q.option_b },
-              { key: "C", text: q.option_c },
-              { key: "D", text: q.option_d },
-            ];
-            const displayLabels = ["A", "B", "C", "D"];
-            const startedAtIso = detail.started_at
-              ? new Date(detail.started_at).toISOString()
-              : "";
-            const options = detail.shuffle_options
-              ? seededShuffle(
-                  baseOptions,
-                  `${detail.exam_id}-${q.id}-${startedAtIso}`
-                )
-              : baseOptions;
-            const selectedIdx = options.findIndex((o) => o.key === q.selected_option);
-            const selectedDisplayLabel =
-              selectedIdx >= 0 ? displayLabels[selectedIdx] : q.selected_option;
+            <div className="review-list">
+              {detail.questions?.map((q, idx) => {
+                const isCorrect = q.is_correct;
+                const baseOptions = [
+                  { key: "A", text: q.option_a },
+                  { key: "B", text: q.option_b },
+                  { key: "C", text: q.option_c },
+                  { key: "D", text: q.option_d },
+                ];
+                const displayLabels = ["A", "B", "C", "D"];
+                const startedAtIso = detail.started_at
+                  ? new Date(detail.started_at).toISOString()
+                  : "";
+                const options = detail.shuffle_options
+                  ? seededShuffle(
+                      baseOptions,
+                      `${detail.exam_id}-${q.id}-${startedAtIso}`
+                    )
+                  : baseOptions;
+                const selectedIdx = options.findIndex((o) => o.key === q.selected_option);
+                const selectedDisplayLabel =
+                  selectedIdx >= 0 ? displayLabels[selectedIdx] : q.selected_option;
 
-            return (
-              <article
-                key={q.id}
-                className={`review-question-card ${isCorrect ? "correct" : "wrong"}`}
-              >
-                <div className="review-q-header">
-                  <span className="review-q-num">Câu {idx + 1}</span>
-                  <span className={`review-status-pill ${isCorrect ? "ok" : "err"}`}>
-                    {isCorrect
-                      ? "✓ Trả lời chính xác"
-                      : q.selected_option
-                      ? `✕ Chọn sai (Bạn chọn ${selectedDisplayLabel})`
-                      : "✕ Chưa chọn đáp án"}
-                  </span>
-                </div>
+                return (
+                  <article
+                    key={q.id}
+                    className={`review-question-card ${isCorrect ? "correct" : "wrong"}`}
+                  >
+                    <div className="review-q-header">
+                      <span className="review-q-num">Câu {idx + 1}</span>
+                      <span className={`review-status-pill ${isCorrect ? "ok" : "err"}`}>
+                        {isCorrect
+                          ? "✓ Trả lời chính xác"
+                          : q.selected_option
+                          ? `✕ Chọn sai (Bạn chọn ${selectedDisplayLabel})`
+                          : "✕ Chưa chọn đáp án"}
+                      </span>
+                    </div>
 
-                <p className="review-q-content">{q.content}</p>
+                    <p className="review-q-content">{q.content}</p>
 
-                <div className="review-options-grid">
-                  {options.map((opt, optIdx) => {
-                    const isRightAns = canViewAnswers && q.correct_answer === opt.key;
-                    const isUserSelected = q.selected_option === opt.key;
+                    <div className="review-options-grid">
+                      {options.map((opt, optIdx) => {
+                        const isRightAns = q.correct_answer === opt.key;
+                        const isUserSelected = q.selected_option === opt.key;
 
-                    let cls = "review-option-item";
-                    if (isRightAns || (isUserSelected && isCorrect)) {
-                      cls += " right-answer";
-                    } else if (isUserSelected && !isCorrect) {
-                      cls += " wrong-selected";
-                    }
+                        let cls = "review-option-item";
+                        if (isRightAns) {
+                          cls += " right-answer";
+                        } else if (isUserSelected && !isCorrect) {
+                          cls += " wrong-selected";
+                        }
 
-                    return (
-                      <div key={opt.key} className={cls}>
-                        <span className="opt-badge">{displayLabels[optIdx] || opt.key}</span>
-                        <span className="opt-label">{opt.text}</span>
-                        {isRightAns && (
-                          <span className="opt-tag-right">✓ Đáp án đúng</span>
-                        )}
-                        {!canViewAnswers && isUserSelected && isCorrect && (
-                          <span className="opt-tag-right">✓ Bạn đã chọn</span>
-                        )}
-                        {isUserSelected && !isCorrect && (
-                          <span className="opt-tag-wrong">✕ Bạn đã chọn</span>
-                        )}
+                        return (
+                          <div key={opt.key} className={cls}>
+                            <span className="opt-badge">{displayLabels[optIdx] || opt.key}</span>
+                            <span className="opt-label">{opt.text}</span>
+                            {isRightAns && (
+                              <span className="opt-tag-right">
+                                ✓ {isUserSelected ? "Bạn chọn đúng" : "Đáp án đúng"}
+                              </span>
+                            )}
+                            {isUserSelected && !isCorrect && (
+                              <span className="opt-tag-wrong">✕ Bạn đã chọn</span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {q.explanation && (
+                      <div className="explanation-banner">
+                        <strong>💡 Giải thích chi tiết:</strong> {q.explanation}
                       </div>
-                    );
-                  })}
-                </div>
-
-                {canViewAnswers && q.explanation && (
-                  <div className="explanation-banner">
-                    <strong>💡 Giải thích chi tiết:</strong> {q.explanation}
-                  </div>
-                )}
-              </article>
-            );
-          })}
-        </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </>
+        )}
       </section>
     </div>
   );

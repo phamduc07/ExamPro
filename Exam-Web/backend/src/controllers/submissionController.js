@@ -276,11 +276,23 @@ export async function getMySubmissions(req, res, next) {
     const [rows] = await pool.query(
       `
       SELECT
-        sub.*,
+        sub.id,
+        sub.exam_id,
+        sub.student_id,
+        sub.score,
+        sub.correct_count,
+        sub.total_questions,
+        sub.time_spent_seconds,
+        sub.started_at,
+        sub.tab_switch_count,
+        sub.is_suspended,
+        sub.suspend_reason,
+        sub.submitted_at,
         e.title AS exam_title,
         e.duration_minutes,
         e.pass_score,
         e.subject_id,
+        e.anti_cheat,
         s.name AS subject_name,
         s.code AS subject_code
       FROM submissions sub
@@ -316,7 +328,7 @@ export async function getSubmissionDetail(req, res, next) {
         e.close_at,
         e.max_attempts,
         e.shuffle_options,
-        (e.is_published = 0 OR (e.close_at IS NOT NULL AND e.close_at <= NOW())) AS is_exam_closed,
+        e.anti_cheat,
         s.name AS subject_name,
         s.code AS subject_code,
         u.full_name AS student_name,
@@ -347,21 +359,27 @@ export async function getSubmissionDetail(req, res, next) {
       });
     }
 
-    let canViewAnswers = true;
-    if (req.user.role === "STUDENT") {
-      const [attemptCountRows] = await pool.query(
-        "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ? AND student_id = ?",
-        [submission.exam_id, req.user.id]
-      );
-      const studentAttemptCount = Number(attemptCountRows[0]?.cnt || 0);
-      const maxAttempts = Number(submission.max_attempts) || 0;
-      const isClosedByTime =
-        !Boolean(submission.is_published) ||
-        (submission.close_at !== null &&
-          submission.close_at !== undefined &&
-          new Date(submission.close_at).getTime() <= Date.now());
-      const exhaustedAttempts = maxAttempts > 0 && studentAttemptCount >= maxAttempts;
-      canViewAnswers = isClosedByTime || exhaustedAttempts;
+    const isAntiCheatExam = Boolean(Number(submission.anti_cheat));
+    const isSuspended =
+      Number(submission.is_suspended) === 1 || Boolean(submission.suspend_reason);
+    const passed =
+      !isSuspended && Number(submission.score) >= Number(submission.pass_score ?? 5);
+    const { answers_json, ...summarySubmission } = submission;
+
+    if (isAntiCheatExam) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...summarySubmission,
+          anti_cheat: 1,
+          passed,
+          is_passed: passed,
+          is_suspended: isSuspended ? 1 : 0,
+          hideDetails: true,
+          can_view_answers: false,
+          questions: [],
+        },
+      });
     }
 
     const [questions] = await pool.query(
@@ -386,27 +404,13 @@ export async function getSubmissionDetail(req, res, next) {
     );
 
     const parsedAnswers =
-      typeof submission.answers_json === "string"
-        ? JSON.parse(submission.answers_json || "{}")
-        : submission.answers_json || {};
+      typeof answers_json === "string"
+        ? JSON.parse(answers_json || "{}")
+        : answers_json || {};
 
     const detailedQuestions = questions.map((q) => {
       const selectedOption = parsedAnswers[q.id] || parsedAnswers[String(q.id)] || null;
       const isCorrect = selectedOption === q.correct_answer;
-      if (!canViewAnswers) {
-        return {
-          id: q.id,
-          content: q.content,
-          option_a: q.option_a,
-          option_b: q.option_b,
-          option_c: q.option_c,
-          option_d: q.option_d,
-          difficulty: q.difficulty,
-          order_index: q.order_index,
-          selected_option: selectedOption,
-          is_correct: isCorrect,
-        };
-      }
       return {
         ...q,
         selected_option: selectedOption,
@@ -417,8 +421,13 @@ export async function getSubmissionDetail(req, res, next) {
     return res.status(200).json({
       success: true,
       data: {
-        ...submission,
-        can_view_answers: canViewAnswers,
+        ...summarySubmission,
+        anti_cheat: 0,
+        passed,
+        is_passed: passed,
+        is_suspended: isSuspended ? 1 : 0,
+        hideDetails: false,
+        can_view_answers: true,
         questions: detailedQuestions,
       },
     });
