@@ -22,6 +22,10 @@ export const useExamStore = create(persist((set, get) => ({
 
   startExamSession: (examData, userId) => {
     const saved = get();
+    const durationSec = (Number(examData.duration_minutes) || 30) * 60;
+    const parsedServerStart = examData.started_at ? Date.parse(examData.started_at) : NaN;
+    const hasServerStart = Number.isFinite(parsedServerStart);
+    const serverDeadline = hasServerStart ? parsedServerStart + durationSec * 1000 : null;
     const savedIds = (saved.questions || [])
       .map((q) => Number(q.id))
       .sort((a, b) => a - b)
@@ -30,35 +34,49 @@ export const useExamStore = create(persist((set, get) => ({
       .map((q) => Number(q.id))
       .sort((a, b) => a - b)
       .join(",");
+    const sameAttemptStart =
+      !hasServerStart ||
+      !saved.startedAt ||
+      Math.abs(Date.parse(saved.startedAt) - parsedServerStart) < 5000;
 
     if (
       saved.ownerId === userId &&
       saved.activeExam?.id === examData.id &&
-      saved.totalSeconds === Number(examData.duration_minutes) * 60 &&
+      saved.totalSeconds === durationSec &&
       savedIds !== "" &&
-      savedIds === incomingIds
+      savedIds === incomingIds &&
+      sameAttemptStart
     ) {
+      const effectiveDeadline = hasServerStart ? serverDeadline : saved.deadline;
       set({
+        deadline: effectiveDeadline,
         activeExam: examData,
         questions: saved.questions,
-        startedAt: saved.startedAt || new Date().toISOString(),
+        startedAt: hasServerStart
+          ? new Date(parsedServerStart).toISOString()
+          : saved.startedAt || new Date().toISOString(),
         tabSwitchCount: saved.tabSwitchCount || 0,
-        remainingSeconds: Math.max(0, Math.ceil((saved.deadline - Date.now()) / 1000)),
+        remainingSeconds: Math.max(0, Math.ceil((effectiveDeadline - Date.now()) / 1000)),
       });
       return;
     }
-    const durationSec = (Number(examData.duration_minutes) || 30) * 60;
+
+    const resolvedDeadline = hasServerStart
+      ? serverDeadline
+      : Date.now() + durationSec * 1000;
     set({
       ownerId: userId,
-      deadline: Date.now() + durationSec * 1000,
-      startedAt: new Date().toISOString(),
+      deadline: resolvedDeadline,
+      startedAt: hasServerStart
+        ? new Date(parsedServerStart).toISOString()
+        : new Date().toISOString(),
       tabSwitchCount: 0,
       activeExam: examData,
       questions: examData.questions || [],
       currentIndex: 0,
       answers: {},
       flaggedQuestions: [],
-      remainingSeconds: durationSec,
+      remainingSeconds: Math.max(0, Math.ceil((resolvedDeadline - Date.now()) / 1000)),
       totalSeconds: durationSec,
     });
   },

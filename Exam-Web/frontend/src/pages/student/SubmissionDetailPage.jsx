@@ -41,7 +41,10 @@ export default function SubmissionDetailPage() {
   }
 
   const score = Number(detail.score);
-  const passed = score >= Number(detail.pass_score ?? 5);
+  const isSuspended =
+    Number(detail.is_suspended) === 1 || Boolean(detail.suspend_reason);
+  const passed = !isSuspended && score >= Number(detail.pass_score ?? 5);
+  const canViewAnswers = detail.can_view_answers !== false;
   const accuracy =
     detail.total_questions > 0
       ? Math.round((detail.correct_count / detail.total_questions) * 100)
@@ -65,7 +68,11 @@ export default function SubmissionDetailPage() {
             <span className="gauge-unit">THANG ĐIỂM 10</span>
           </div>
           <span className={`verdict-badge ${passed ? "pass" : "fail"}`}>
-            {passed ? "🎉 ĐẠT YÊU CẦU" : "⚠️ CẦN CỐ GẮNG THÊM"}
+            {isSuspended
+              ? "🚫 BỊ ĐÌNH CHỈ"
+              : passed
+              ? "🎉 ĐẠT YÊU CẦU"
+              : "⚠️ CẦN CỐ GẮNG THÊM"}
           </span>
         </div>
 
@@ -103,8 +110,14 @@ export default function SubmissionDetailPage() {
 
       <section className="review-questions-section">
         <h2 className="section-title-heading">
-          Chi tiết đáp án & Lời giải ({detail.questions?.length || 0} câu)
+          Chi tiết bài làm ({detail.questions?.length || 0} câu)
         </h2>
+
+        {!canViewAnswers && (
+          <div className="alert-box alert-warning" style={{ marginBottom: "16px" }}>
+            🔒 Đề thi hiện vẫn đang mở và bạn còn lượt làm bài nên đáp án đúng và lời giải chi tiết tạm thời được ẩn.
+          </div>
+        )}
 
         <div className="review-list">
           {detail.questions?.map((q, idx) => {
@@ -136,12 +149,15 @@ export default function SubmissionDetailPage() {
 
                 <div className="review-options-grid">
                   {options.map((opt) => {
-                    const isRightAns = q.correct_answer === opt.key;
+                    const isRightAns = canViewAnswers && q.correct_answer === opt.key;
                     const isUserSelected = q.selected_option === opt.key;
 
                     let cls = "review-option-item";
-                    if (isRightAns) cls += " right-answer";
-                    else if (isUserSelected && !isRightAns) cls += " wrong-selected";
+                    if (isRightAns || (isUserSelected && isCorrect)) {
+                      cls += " right-answer";
+                    } else if (isUserSelected && !isCorrect) {
+                      cls += " wrong-selected";
+                    }
 
                     return (
                       <div key={opt.key} className={cls}>
@@ -150,7 +166,10 @@ export default function SubmissionDetailPage() {
                         {isRightAns && (
                           <span className="opt-tag-right">✓ Đáp án đúng</span>
                         )}
-                        {isUserSelected && !isRightAns && (
+                        {!canViewAnswers && isUserSelected && isCorrect && (
+                          <span className="opt-tag-right">✓ Bạn đã chọn</span>
+                        )}
+                        {isUserSelected && !isCorrect && (
                           <span className="opt-tag-wrong">✕ Bạn đã chọn</span>
                         )}
                       </div>
@@ -158,7 +177,7 @@ export default function SubmissionDetailPage() {
                   })}
                 </div>
 
-                {q.explanation && (
+                {canViewAnswers && q.explanation && (
                   <div className="explanation-banner">
                     <strong>💡 Giải thích chi tiết:</strong> {q.explanation}
                   </div>

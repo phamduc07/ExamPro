@@ -27,9 +27,9 @@ export function validateExam(body, { isMetadataOnly = false } = {}) {
     maxAttempts !== null &&
     maxAttempts !== undefined &&
     maxAttempts !== "" &&
-    (!isNumber(maxAttempts) || !Number.isInteger(Number(maxAttempts)) || Number(maxAttempts) < 0)
+    (!isNumber(maxAttempts) || !Number.isInteger(Number(maxAttempts)) || Number(maxAttempts) < 1)
   ) {
-    return "Giới hạn lượt làm bài phải là số nguyên không âm.";
+    return "Giới hạn lượt làm bài phải là số nguyên từ 1 trở lên.";
   }
 
   const openAt = body.openAt ? new Date(body.openAt) : null;

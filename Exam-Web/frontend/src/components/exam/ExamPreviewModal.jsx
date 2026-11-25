@@ -31,7 +31,7 @@ export default function ExamPreviewModal({
                   ? " • 🛡️ 0 lần rời tab (Nghiêm ngặt)"
                   : ` • 🛡️ Tối đa ${form.maxTabSwitches} lần rời tab`
                 : " • 🛡️ Rời tab: Không giới hạn"}
-              {form.maxAttempts !== null
+              {form.maxAttempts !== null && Number(form.maxAttempts) >= 1
                 ? ` • 🔁 Tối đa ${form.maxAttempts} lượt`
                 : " • 🔁 Lượt thi: Không giới hạn"}
             </p>

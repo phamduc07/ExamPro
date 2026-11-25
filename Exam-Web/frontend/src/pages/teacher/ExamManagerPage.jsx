@@ -239,7 +239,8 @@ export default function ExamManagerPage() {
           : String(Number(sessionTemplateExam.max_tab_switches)),
       maxAttempts:
         sessionTemplateExam.max_attempts === null ||
-        sessionTemplateExam.max_attempts === undefined
+        sessionTemplateExam.max_attempts === undefined ||
+        Number(sessionTemplateExam.max_attempts) < 1
           ? null
           : String(Number(sessionTemplateExam.max_attempts)),
     }));
@@ -510,7 +511,9 @@ export default function ExamManagerPage() {
             ? null
             : String(Number(detail.max_tab_switches)),
         maxAttempts:
-          detail.max_attempts === null || detail.max_attempts === undefined
+          detail.max_attempts === null ||
+          detail.max_attempts === undefined ||
+          Number(detail.max_attempts) < 1
             ? null
             : String(Number(detail.max_attempts)),
         openAt: toDateTimeLocalValue(detail.open_at),
@@ -548,6 +551,17 @@ export default function ExamManagerPage() {
       setNotice({
         type: "error",
         text: `⚠️ Đợt thi "${form.examSession.trim()}" yêu cầu chọn đúng ${sessionTemplateExam.question_count} câu hỏi để đồng bộ với các ca trước (hiện đang chọn ${form.questionIds.length} câu).`,
+      });
+      return;
+    }
+
+    if (
+      form.maxAttempts !== null &&
+      (form.maxAttempts === "" || Number(form.maxAttempts) < 1)
+    ) {
+      setNotice({
+        type: "error",
+        text: "⚠️ Giới hạn số lượt thi phải từ 1 lượt trở lên (hoặc tích chọn Không giới hạn).",
       });
       return;
     }
@@ -623,7 +637,9 @@ export default function ExamManagerPage() {
             ? null
             : String(Number(detail.max_tab_switches)),
         maxAttempts:
-          detail.max_attempts === null || detail.max_attempts === undefined
+          detail.max_attempts === null ||
+          detail.max_attempts === undefined ||
+          Number(detail.max_attempts) < 1
             ? null
             : String(Number(detail.max_attempts)),
         openAt: toDateTimeLocalValue(detail.open_at),
@@ -1178,7 +1194,7 @@ export default function ExamManagerPage() {
                     <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                       <input
                         type="number"
-                        min="0"
+                        min="1"
                         step="1"
                         placeholder="Không giới hạn"
                         disabled={isSessionLocked || form.maxAttempts === null}
@@ -1210,7 +1226,7 @@ export default function ExamManagerPage() {
                           onChange={(e) =>
                             setForm((p) => ({
                               ...p,
-                              maxAttempts: e.target.checked ? null : "0",
+                              maxAttempts: e.target.checked ? null : "1",
                             }))
                           }
                           style={{ width: "auto" }}

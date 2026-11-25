@@ -57,6 +57,7 @@ import {
   suspendSubmission,
   unsuspendSubmission,
   recordExamViolation,
+  getExamAttemptStatus,
 } from "../controllers/submissionController.js";
 
 const router = express.Router();
@@ -125,6 +126,7 @@ router.get("/exams", verifyToken, getExams);
 router.get("/exams/admin-overview", verifyToken, requireRole("TEACHER"), getAdminExamOverview);
 router.get("/exams/admin-logs", verifyToken, requireRole("TEACHER"), getAdminLogs);
 router.get("/exams/:id/leaderboard", verifyToken, requireRole("TEACHER"), getExamLeaderboard);
+router.get("/exams/:id/attempt-status", verifyToken, requireRole("STUDENT"), getExamAttemptStatus);
 router.get("/exams/:id", verifyToken, getExamById);
 router.post("/exams/:id/violation", verifyToken, requireRole("STUDENT"), recordExamViolation);
 router.post("/exams", verifyToken, requireRole("TEACHER"), createExam);

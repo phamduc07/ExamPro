@@ -128,6 +128,8 @@ export async function getExamById(req, res, next) {
     }
 
     const exam = examRows[0];
+    const hasMaxAttempts = Number(exam.max_attempts) >= 1;
+
     if (req.user.role === "STUDENT") {
       if (!exam.is_published) {
         return res.status(403).json({ success: false, message: "Đề thi này chưa được mở." });
@@ -152,7 +154,57 @@ export async function getExamById(req, res, next) {
           message: "Đề thi này không thuộc khối ngành của bạn.",
         });
       }
-      if (exam.max_attempts !== null && exam.max_attempts !== undefined) {
+
+      const [existingAttempt] = await pool.query(
+        "SELECT started_at, status, is_suspended, suspend_reason FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
+        [id, req.user.id]
+      );
+
+      if (existingAttempt.length > 0 && Number(existingAttempt[0].is_suspended) === 1) {
+        const reason = existingAttempt[0].suspend_reason || "Vi phạm quy chế phòng thi";
+        return res.status(403).json({
+          success: false,
+          isSuspended: true,
+          suspendReason: reason,
+          message: `Bài thi của bạn đã bị Giám thị đình chỉ (0 điểm). Lý do: ${reason}`,
+        });
+      }
+
+      if (
+        existingAttempt.length > 0 &&
+        existingAttempt[0].status === "IN_PROGRESS" &&
+        existingAttempt[0].started_at
+      ) {
+        const prevStartedMs = new Date(existingAttempt[0].started_at).getTime();
+        const maxDurationSec = (Number(exam.duration_minutes) || 30) * 60;
+        if (
+          Number.isFinite(prevStartedMs) &&
+          Date.now() > prevStartedMs + (maxDurationSec + 30) * 1000
+        ) {
+          const [qCntRows] = await pool.query(
+            "SELECT COUNT(*) AS cnt FROM exam_questions WHERE exam_id = ?",
+            [id]
+          );
+          await pool.query(
+            `INSERT INTO submissions
+              (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, answers_json)
+             VALUES (?, ?, 0, 0, ?, ?, ?, 0, '{}')`,
+            [
+              Number(id),
+              req.user.id,
+              Number(qCntRows[0]?.cnt) || 0,
+              maxDurationSec,
+              new Date(prevStartedMs),
+            ]
+          );
+          await pool.query(
+            "UPDATE exam_attempts SET status = 'COMPLETED' WHERE exam_id = ? AND user_id = ?",
+            [id, req.user.id]
+          );
+        }
+      }
+
+      if (hasMaxAttempts) {
         const [attemptRows] = await pool.query(
           "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ? AND student_id = ?",
           [id, req.user.id]
@@ -164,6 +216,31 @@ export async function getExamById(req, res, next) {
           });
         }
       }
+    }
+
+    const [[qCountRow], [subCountRow], [mySubCountRow]] = await Promise.all([
+      pool.query("SELECT COUNT(*) AS cnt FROM exam_questions WHERE exam_id = ?", [id]),
+      pool.query("SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ?", [id]),
+      pool.query("SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ? AND student_id = ?", [
+        id,
+        req.user.id,
+      ]),
+    ]);
+
+    const questionCount = Number(qCountRow[0]?.cnt || 0);
+    const submissionCount = Number(subCountRow[0]?.cnt || 0);
+    const myAttemptCount = Number(mySubCountRow[0]?.cnt || 0);
+
+    if (mode === "preview") {
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...exam,
+          question_count: questionCount,
+          submission_count: submissionCount,
+          my_attempt_count: myAttemptCount,
+        },
+      });
     }
 
     const [questionRows] = await pool.query(
@@ -211,50 +288,39 @@ export async function getExamById(req, res, next) {
     }
 
     let currentTabSwitchCount = 0;
-    if (req.user?.role === "STUDENT" && mode === "take") {
-      const [existingAttempt] = await pool.query(
-        "SELECT is_suspended, suspend_reason FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
-        [id, req.user.id]
-      );
-      if (existingAttempt.length > 0 && Number(existingAttempt[0].is_suspended) === 1) {
-        const reason = existingAttempt[0].suspend_reason || "Vi phạm quy chế phòng thi";
-        return res.status(403).json({
-          success: false,
-          isSuspended: true,
-          suspendReason: reason,
-          message: `Bài thi của bạn đã bị Giám thị đình chỉ (0 điểm). Lý do: ${reason}`,
-        });
-      }
-
+    let activeStartedAt = null;
+    if (req.user?.role === "STUDENT") {
+      const nowDate = new Date();
       await pool.query(
         `INSERT INTO exam_attempts (exam_id, user_id, started_at, status, tab_switch_count, last_violation_at, last_violation_reason)
-         VALUES (?, ?, NOW(), 'IN_PROGRESS', 0, NULL, NULL)
+         VALUES (?, ?, ?, 'IN_PROGRESS', 0, NULL, NULL)
          ON DUPLICATE KEY UPDATE
-           started_at = IF(status = 'IN_PROGRESS', started_at, NOW()),
+           started_at = IF(status = 'IN_PROGRESS', started_at, VALUES(started_at)),
            tab_switch_count = IF(status = 'IN_PROGRESS', tab_switch_count, 0),
            last_violation_at = IF(status = 'IN_PROGRESS', last_violation_at, NULL),
            last_violation_reason = IF(status = 'IN_PROGRESS', last_violation_reason, NULL),
            status = 'IN_PROGRESS'`,
-        [id, req.user.id]
+        [id, req.user.id, nowDate]
       );
 
       const [activeAttempt] = await pool.query(
-        "SELECT tab_switch_count FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
+        "SELECT started_at, tab_switch_count FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
         [id, req.user.id]
       );
       currentTabSwitchCount = Math.max(0, Number(activeAttempt[0]?.tab_switch_count) || 0);
+      if (activeAttempt[0]?.started_at) {
+        activeStartedAt = new Date(activeAttempt[0].started_at).toISOString();
+      }
     }
-
-    const [subCountRows] = await pool.query(
-      "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ?",
-      [id]
-    );
 
     return res.status(200).json({
       success: true,
       data: {
         ...exam,
-        submission_count: Number(subCountRows[0]?.cnt || 0),
+        question_count: questionCount,
+        submission_count: submissionCount,
+        my_attempt_count: myAttemptCount,
+        started_at: activeStartedAt,
         current_tab_switch_count: currentTabSwitchCount,
         questions: formattedQuestions,
       },
@@ -299,6 +365,12 @@ async function saveExam(req, res, next, isUpdate) {
     const parseOptionalLimit = (val) => {
       if (val === null || val === undefined || val === "") return null;
       return Number(val);
+    };
+
+    const parseOptionalAttempts = (val) => {
+      if (val === null || val === undefined || val === "") return null;
+      const num = Number(val);
+      return num >= 1 ? num : null;
     };
 
     const cleanSession = String(examSession || "").trim() || null;
@@ -349,7 +421,7 @@ async function saveExam(req, res, next, isUpdate) {
           shuffleOptions ? 1 : 0,
           antiCheat ? 1 : 0,
           parseOptionalLimit(maxTabSwitches),
-          parseOptionalLimit(maxAttempts),
+          parseOptionalAttempts(maxAttempts),
           resolvedOpenAt,
           resolvedCloseAt,
           req.params.id,
@@ -381,7 +453,7 @@ async function saveExam(req, res, next, isUpdate) {
     let finalShuffleOptions = shuffleOptions ? 1 : 0;
     let finalAntiCheat = antiCheat ? 1 : 0;
     let finalMaxTabSwitches = parseOptionalLimit(maxTabSwitches);
-    let finalMaxAttempts = parseOptionalLimit(maxAttempts);
+    let finalMaxAttempts = parseOptionalAttempts(maxAttempts);
 
     if (!isUpdate && sessionMode === "NEW_SESSION") {
       if (!cleanSession) {
@@ -456,7 +528,7 @@ async function saveExam(req, res, next, isUpdate) {
         finalShuffleOptions = tpl.shuffle_options ? 1 : 0;
         finalAntiCheat = tpl.anti_cheat ? 1 : 0;
         finalMaxTabSwitches = parseOptionalLimit(tpl.max_tab_switches);
-        finalMaxAttempts = parseOptionalLimit(tpl.max_attempts);
+        finalMaxAttempts = parseOptionalAttempts(tpl.max_attempts);
       }
     }
 

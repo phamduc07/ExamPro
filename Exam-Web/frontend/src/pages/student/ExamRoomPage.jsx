@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
 import { useExamStore } from "../../store/useExamStore";
@@ -39,6 +39,7 @@ export default function ExamRoomPage() {
     answers,
     flaggedQuestions,
     remainingSeconds,
+    startedAt,
     tabSwitchCount,
     startExamSession,
     selectAnswer,
@@ -64,7 +65,35 @@ export default function ExamRoomPage() {
   const autoSubmitTimerRef = useRef(null);
   const ignoreBlurUntilRef = useRef(0);
 
+  const lockRoomWithModal = useCallback(
+    ({
+      title = "🚫 Bài thi đã bị Giám thị đình chỉ (0 điểm)",
+      reason = "Bài thi của bạn đã bị Giám thị đình chỉ (0 điểm).",
+      nextPath = "/my-results",
+      actionLabel = "Về trang Lịch sử làm bài",
+    }) => {
+      submitLockRef.current = true;
+      setSubmitting(false);
+      setShowConfirmModal(false);
+      if (autoSubmitTimerRef.current) {
+        clearTimeout(autoSubmitTimerRef.current);
+        autoSubmitTimerRef.current = null;
+      }
+      if (document.fullscreenElement && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
+      setViolationModal({
+        title,
+        reason,
+        nextPath,
+        actionLabel,
+      });
+    },
+    []
+  );
+
   useEffect(() => {
+    if (!user?.id) return;
     let cancelled = false;
     submitLockRef.current = false;
     setSubmitting(false);
@@ -85,7 +114,7 @@ export default function ExamRoomPage() {
           err.response?.data?.message || err.message || "Không thể vào phòng thi.",
           "error"
         );
-        navigate("/");
+        navigate(err.response?.data?.isSuspended ? "/my-results" : "/");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -94,7 +123,7 @@ export default function ExamRoomPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, user.id, navigate, startExamSession]);
+  }, [id, user?.id, navigate, startExamSession, setTabSwitchCount, showToast]);
 
   const handleFinalSubmit = useCallback(
     async (isAuto = false, autoReason = "timeout") => {
@@ -119,7 +148,7 @@ export default function ExamRoomPage() {
         const submissionId = res.data.data.submissionId;
         const finalTabCount = currentState.tabSwitchCount || 0;
         if (isAuto && autoReason === "tabLimit") {
-          setViolationModal({
+          lockRoomWithModal({
             title: "🚫 Bài thi đã bị đình chỉ / thu bài do vi phạm quy chế",
             reason: `Bạn đã rời tab / thoát toàn màn hình vượt quá giới hạn cho phép (${finalTabCount} lần). Hệ thống đã tự động thu bài của bạn.`,
             nextPath: `/results/${submissionId}`,
@@ -140,7 +169,7 @@ export default function ExamRoomPage() {
         navigate(`/results/${submissionId}`, { replace: true });
       } catch (err) {
         if (err.response?.data?.isSuspended) {
-          setViolationModal({
+          lockRoomWithModal({
             title: "🚫 Bài thi đã bị đình chỉ / thu bài do vi phạm quy chế",
             reason:
               err.response.data.suspendReason ||
@@ -151,6 +180,18 @@ export default function ExamRoomPage() {
           });
           return;
         }
+        if (err.response?.data?.isExpired) {
+          resetExamSession();
+          if (document.fullscreenElement && document.exitFullscreen) {
+            document.exitFullscreen().catch(() => {});
+          }
+          showToast(
+            err.response.data.message || "Đã vượt quá thời gian làm bài cho phép.",
+            "error"
+          );
+          navigate("/my-results", { replace: true });
+          return;
+        }
         submitLockRef.current = false;
         setSubmitting(false);
         showToast(
@@ -159,13 +200,14 @@ export default function ExamRoomPage() {
         );
       }
     },
-    [id, navigate, resetExamSession, showToast]
+    [id, navigate, resetExamSession, showToast, lockRoomWithModal]
   );
 
   useEffect(() => {
-    if (loading || !activeExam || questions.length === 0) return;
+    if (loading || !activeExam || questions.length === 0 || violationModal) return;
 
     const interval = setInterval(() => {
+      if (submitLockRef.current) return;
       tickTimer();
       const currentRem = useExamStore.getState().remainingSeconds;
       if (currentRem <= 0) {
@@ -175,7 +217,38 @@ export default function ExamRoomPage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [loading, activeExam, questions.length, tickTimer, handleFinalSubmit]);
+  }, [loading, activeExam, questions.length, violationModal, tickTimer, handleFinalSubmit]);
+
+  useEffect(() => {
+    if (loading || !activeExam || violationModal) return;
+    let active = true;
+
+    const checkStatus = async () => {
+      if (submitLockRef.current) return;
+      try {
+        const res = await axiosClient.get(`/exams/${id}/attempt-status`);
+        if (!active || submitLockRef.current) return;
+        if (res.data?.data?.isSuspended) {
+          lockRoomWithModal({
+            title: "🚫 Bài thi đã bị Giám thị đình chỉ (0 điểm)",
+            reason:
+              res.data.data.suspendReason ||
+              "Bài thi của bạn đã bị Giám thị đình chỉ do vi phạm quy chế phòng thi.",
+            nextPath: "/my-results",
+            actionLabel: "Về trang Lịch sử làm bài",
+          });
+        }
+      } catch {
+        return;
+      }
+    };
+
+    const pollTimer = setInterval(checkStatus, 4000);
+    return () => {
+      active = false;
+      clearInterval(pollTimer);
+    };
+  }, [id, loading, activeExam, violationModal, lockRoomWithModal]);
 
   const reportViolationToServer = useCallback(
     async (reason) => {
@@ -197,16 +270,34 @@ export default function ExamRoomPage() {
         });
         const json = await response.json().catch(() => null);
         if (json?.success && json.data) {
-          setTabSwitchCount(json.data.tabSwitchCount);
+          if (typeof json.data.tabSwitchCount === "number") {
+            setTabSwitchCount(json.data.tabSwitchCount);
+          }
+          if (json.data.isSuspended) {
+            lockRoomWithModal({
+              title: "🚫 Bài thi đã bị Giám thị đình chỉ (0 điểm)",
+              reason:
+                json.data.suspendReason ||
+                "Bài thi của bạn đã bị Giám thị đình chỉ do vi phạm quy chế phòng thi.",
+              nextPath: "/my-results",
+              actionLabel: "Về trang Lịch sử làm bài",
+            });
+            return json.data;
+          }
           if (json.data.forceSubmit) {
-            if (autoSubmitTimerRef.current) {
-              clearTimeout(autoSubmitTimerRef.current);
-              autoSubmitTimerRef.current = null;
-            }
             setAntiCheatWarning(
-              `🚨 Bạn đã vi phạm quá giới hạn (${json.data.tabSwitchCount}/${json.data.maxTabSwitches}). Hệ thống đang tự động thu bài!`
+              `🚨 Bạn đã vi phạm quá giới hạn (${json.data.tabSwitchCount}/${json.data.maxTabSwitches}). Hệ thống đã tự động thu bài (0 điểm)!`
             );
-            handleFinalSubmit(true, "tabLimit");
+            lockRoomWithModal({
+              title: "🚫 Bài thi đã bị thu bài (0 điểm) do vi phạm quy chế",
+              reason: `Bạn đã rời tab / thoát toàn màn hình vượt quá giới hạn cho phép (${json.data.tabSwitchCount}/${json.data.maxTabSwitches} lần). Hệ thống đã tự động chấm 0 điểm và đóng lượt làm bài này.`,
+              nextPath: json.data.submissionId
+                ? `/results/${json.data.submissionId}`
+                : "/my-results",
+              actionLabel: json.data.submissionId
+                ? "Xem kết quả bài thi"
+                : "Về trang Lịch sử làm bài",
+            });
           }
           return json.data;
         }
@@ -215,7 +306,7 @@ export default function ExamRoomPage() {
       }
       return null;
     },
-    [id, setTabSwitchCount, handleFinalSubmit]
+    [id, setTabSwitchCount, lockRoomWithModal]
   );
 
   useEffect(() => {
@@ -293,7 +384,7 @@ export default function ExamRoomPage() {
         (e.ctrlKey && key === "u");
       if (isDevToolsShortcut) {
         e.preventDefault();
-        triggerViolation("Phát hiện phím tắt mở công cụ lập trình (DevTools / Xem nguồn).");
+        setAntiCheatWarning("🛡️ Chế độ Anti-Cheat: Không được phép mở công cụ lập trình (DevTools / Xem nguồn).");
       }
     };
 
@@ -305,21 +396,6 @@ export default function ExamRoomPage() {
       }
     };
 
-    let devToolsInterval = null;
-    let lastResizeViolation = 0;
-    const startDelayTimer = setTimeout(() => {
-      devToolsInterval = setInterval(() => {
-        const now = Date.now();
-        if (now - lastResizeViolation < 800) return;
-        const widthDiff = window.outerWidth - window.innerWidth;
-        const heightDiff = window.outerHeight - window.innerHeight;
-        if (widthDiff > 260 || heightDiff > 220) {
-          lastResizeViolation = now;
-          triggerViolation("Phát hiện cửa sổ DevTools đang mở.");
-        }
-      }, 2000);
-    }, 3000);
-
     document.addEventListener("contextmenu", blockEvent);
     document.addEventListener("copy", blockEvent);
     document.addEventListener("cut", blockEvent);
@@ -328,8 +404,6 @@ export default function ExamRoomPage() {
     document.addEventListener("fullscreenchange", handleFullscreenChange);
 
     return () => {
-      clearTimeout(startDelayTimer);
-      if (devToolsInterval) clearInterval(devToolsInterval);
       document.removeEventListener("contextmenu", blockEvent);
       document.removeEventListener("copy", blockEvent);
       document.removeEventListener("cut", blockEvent);
@@ -369,7 +443,7 @@ export default function ExamRoomPage() {
   const options = activeExam.shuffle_options
     ? seededShuffle(
         baseOptions,
-        `${activeExam.id}-${currentQuestion.id}-${useExamStore.getState().startedAt || ""}`
+        `${activeExam.id}-${currentQuestion.id}-${startedAt || ""}`
       )
     : baseOptions;
 

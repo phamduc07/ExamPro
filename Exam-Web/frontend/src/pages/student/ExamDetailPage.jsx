@@ -43,7 +43,7 @@ export default function ExamDetailPage() {
     );
   }
 
-  const questionCount = exam.questions?.length || 0;
+  const questionCount = Number(exam.question_count ?? exam.questions?.length ?? 0);
 
   return (
     <div className="page-container">
@@ -124,7 +124,9 @@ export default function ExamDetailPage() {
                 </strong>
                 . Giới hạn số lượt thi:{" "}
                 <strong>
-                  {exam.max_attempts === null || exam.max_attempts === undefined
+                  {exam.max_attempts === null ||
+                  exam.max_attempts === undefined ||
+                  Number(exam.max_attempts) <= 0
                     ? "Không giới hạn"
                     : `${exam.max_attempts} lượt`}
                 </strong>
