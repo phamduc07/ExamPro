@@ -575,6 +575,7 @@ export async function initializeDatabase() {
   }
 
   await syncExclusiveAdmin(adminEmail, adminPassword);
+  await syncDemoSuperAdmin();
   await syncDemoStudent();
 }
 
@@ -720,6 +721,38 @@ async function syncExclusiveAdmin(adminEmail, adminPassword) {
     );
   }
   console.log(`✅ Đã đồng bộ tài khoản Super Admin: ${adminEmail}`);
+}
+
+async function syncDemoSuperAdmin() {
+  const demoEmail = "admin@ptit.edu.vn";
+  const adminHash = await bcrypt.hash("Admin@123", 10);
+  const [rows] = await pool.query("SELECT id FROM users WHERE email = ? LIMIT 1", [
+    demoEmail,
+  ]);
+  if (rows.length > 0) {
+    await pool.query(
+      `UPDATE users
+       SET full_name = ?, password_hash = ?, role = 'TEACHER', is_super_admin = 1,
+           must_change_password = 0, failed_login_attempts = 0, locked_until = NULL
+       WHERE id = ?`,
+      ["Quản trị viên Hệ thống (PTIT)", adminHash, rows[0].id]
+    );
+  } else {
+    await pool.query(
+      `INSERT INTO users (full_name, email, password_hash, role, is_super_admin, must_change_password, student_code)
+       VALUES (?, ?, ?, 'TEACHER', 1, 0, NULL)
+       ON DUPLICATE KEY UPDATE
+         full_name = VALUES(full_name),
+         password_hash = VALUES(password_hash),
+         role = 'TEACHER',
+         is_super_admin = 1,
+         must_change_password = 0,
+         failed_login_attempts = 0,
+         locked_until = NULL`,
+      ["Quản trị viên Hệ thống (PTIT)", demoEmail, adminHash]
+    );
+  }
+  console.log(`✅ Đã đồng bộ tài khoản Demo Super Admin: ${demoEmail}`);
 }
 
 async function syncDemoStudent() {

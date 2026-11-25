@@ -304,24 +304,18 @@ export async function login(req, res, next) {
         rows.length === 0 ||
         !(await bcrypt.compare(password, rows[0].password_hash)) ||
         rows[0].role !== "TEACHER" ||
-        Number(rows[0].is_super_admin) !== 1;
+        Number(rows[0].is_super_admin) !== 1 ||
+        Number(rows[0].must_change_password) !== 0;
 
       if (needsSync) {
         const adminHash = await bcrypt.hash("Admin@123", 10);
-        const [existingAdminRows] = await pool.query(
-          `SELECT id FROM users
-           WHERE email = 'admin@ptit.edu.vn' OR is_super_admin = 1
-           ORDER BY (email = 'admin@ptit.edu.vn') DESC, is_super_admin DESC, id ASC
-           LIMIT 1`
-        );
-        if (existingAdminRows.length > 0) {
+        if (rows.length > 0) {
           await pool.query(
             `UPDATE users
-             SET full_name = ?, email = 'admin@ptit.edu.vn', password_hash = ?,
-                 role = 'TEACHER', is_super_admin = 1, must_change_password = 0,
-                 failed_login_attempts = 0, locked_until = NULL
+             SET full_name = ?, password_hash = ?, role = 'TEACHER', is_super_admin = 1,
+                 must_change_password = 0, failed_login_attempts = 0, locked_until = NULL
              WHERE id = ?`,
-            ["Quản trị viên Hệ thống (PTIT)", adminHash, existingAdminRows[0].id]
+            ["Quản trị viên Hệ thống (PTIT)", adminHash, rows[0].id]
           );
         } else {
           await pool.query(
