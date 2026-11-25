@@ -210,15 +210,39 @@ export async function getExamById(req, res, next) {
       formattedQuestions = shuffleArray(formattedQuestions);
     }
 
+    let currentTabSwitchCount = 0;
     if (req.user?.role === "STUDENT" && mode === "take") {
+      const [existingAttempt] = await pool.query(
+        "SELECT is_suspended, suspend_reason FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
+        [id, req.user.id]
+      );
+      if (existingAttempt.length > 0 && Number(existingAttempt[0].is_suspended) === 1) {
+        const reason = existingAttempt[0].suspend_reason || "Vi phạm quy chế phòng thi";
+        return res.status(403).json({
+          success: false,
+          isSuspended: true,
+          suspendReason: reason,
+          message: `Bài thi của bạn đã bị Giám thị đình chỉ (0 điểm). Lý do: ${reason}`,
+        });
+      }
+
       await pool.query(
-        `INSERT INTO exam_attempts (exam_id, user_id, started_at, status)
-         VALUES (?, ?, NOW(), 'IN_PROGRESS')
+        `INSERT INTO exam_attempts (exam_id, user_id, started_at, status, tab_switch_count, last_violation_at, last_violation_reason)
+         VALUES (?, ?, NOW(), 'IN_PROGRESS', 0, NULL, NULL)
          ON DUPLICATE KEY UPDATE
            started_at = IF(status = 'IN_PROGRESS', started_at, NOW()),
+           tab_switch_count = IF(status = 'IN_PROGRESS', tab_switch_count, 0),
+           last_violation_at = IF(status = 'IN_PROGRESS', last_violation_at, NULL),
+           last_violation_reason = IF(status = 'IN_PROGRESS', last_violation_reason, NULL),
            status = 'IN_PROGRESS'`,
         [id, req.user.id]
       );
+
+      const [activeAttempt] = await pool.query(
+        "SELECT tab_switch_count FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
+        [id, req.user.id]
+      );
+      currentTabSwitchCount = Math.max(0, Number(activeAttempt[0]?.tab_switch_count) || 0);
     }
 
     const [subCountRows] = await pool.query(
@@ -231,6 +255,7 @@ export async function getExamById(req, res, next) {
       data: {
         ...exam,
         submission_count: Number(subCountRows[0]?.cnt || 0),
+        current_tab_switch_count: currentTabSwitchCount,
         questions: formattedQuestions,
       },
     });

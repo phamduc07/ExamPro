@@ -764,15 +764,19 @@ export async function resendAdminLoginOtp(req, res, next) {
       });
     }
 
-    const otp = String(crypto.randomInt(100000, 1000000));
+    const otp = isDemoSuperAdminEmail(user.email)
+      ? DEMO_SUPER_ADMIN_OTP
+      : String(crypto.randomInt(100000, 1000000));
     const otpHash = await bcrypt.hash(otp, 10);
 
-    await sendAdminLoginOtpEmail({
-      to: user.email,
-      fullName: user.full_name,
-      otp,
-      expiresMinutes: OTP_EXPIRE_MINUTES,
-    });
+    if (!isDemoSuperAdminEmail(user.email)) {
+      await sendAdminLoginOtpEmail({
+        to: user.email,
+        fullName: user.full_name,
+        otp,
+        expiresMinutes: OTP_EXPIRE_MINUTES,
+      });
+    }
 
     await pool.query(
       `INSERT INTO login_otps (user_id, email, otp_hash, expires_at, attempts, last_sent_at)

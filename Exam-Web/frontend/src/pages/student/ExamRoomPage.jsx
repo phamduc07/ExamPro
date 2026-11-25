@@ -75,6 +75,9 @@ export default function ExamRoomPage() {
         if (cancelled) return;
         if (!res.data.data.questions?.length) throw new Error("Đề thi chưa có câu hỏi.");
         startExamSession(res.data.data, user.id);
+        if (typeof res.data.data.current_tab_switch_count === "number") {
+          setTabSwitchCount(res.data.data.current_tab_switch_count);
+        }
       })
       .catch((err) => {
         if (cancelled) return;
@@ -177,10 +180,10 @@ export default function ExamRoomPage() {
   const reportViolationToServer = useCallback(
     async (reason) => {
       if (submitLockRef.current) return null;
-      const baseUrl = (
-        import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+      const baseUrl = String(
+        axiosClient.defaults.baseURL || "http://localhost:5000/api"
       ).replace(/\/$/, "");
-      const token = localStorage.getItem("ptit_token");
+      const token = localStorage.getItem("ptit_exam_token");
       try {
         const response = await fetch(`${baseUrl}/exams/${id}/violation`, {
           method: "POST",

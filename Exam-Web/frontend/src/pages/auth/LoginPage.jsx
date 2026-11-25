@@ -432,7 +432,7 @@ export default function LoginPage() {
                 </div>
               </div>
               <div className="form-field">
-                <label>Mật khẩu mới (>= 8 ký tự, chữ hoa, chữ thường, số) *</label>
+                <label>Mật khẩu mới (≥ 8 ký tự, chữ hoa, chữ thường, số) *</label>
                 <input
                   type="password"
                   placeholder="Nhập mật khẩu cá nhân mới"
@@ -498,7 +498,7 @@ export default function LoginPage() {
                   />
                 </div>
                 <div className="form-field">
-                  <label>Mật khẩu mới (>= 8 ký tự, chữ hoa, chữ thường, số) *</label>
+                  <label>Mật khẩu mới (≥ 8 ký tự, chữ hoa, chữ thường, số) *</label>
                   <input
                     type="password"
                     placeholder="Nhập mật khẩu mới"
