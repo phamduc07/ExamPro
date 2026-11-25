@@ -3,12 +3,8 @@ import { createPortal } from "react-dom";
 import axiosClient from "../api/axiosClient";
 import { useDialog } from "../context/DialogContext";
 import { MAJOR_GROUP_LABELS } from "../utils/ptitHelper";
-
-const QUICK_SUSPEND_REASONS = [
-  "Vi phạm quy chế phòng thi",
-  "Rời tab / Thoát toàn màn hình quá giới hạn",
-  "Sử dụng tài liệu / DevTools",
-];
+import SuspendExamModal from "./exam/SuspendExamModal";
+import ReopenAttemptModal from "./exam/ReopenAttemptModal";
 
 function formatDuration(sec) {
   const safe = Math.max(0, Number(sec) || 0);
@@ -900,159 +896,21 @@ export default function AdminExamMonitor() {
           document.body
         )}
 
-      {suspendTarget &&
-        createPortal(
-          <div
-            className="custom-modal-backdrop"
-            onClick={() => !suspendSubmitting && setSuspendTarget(null)}
-          >
-            <form
-              className="custom-modal-card danger-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Xác nhận Đình chỉ bài thi"
-              onClick={(e) => e.stopPropagation()}
-              onSubmit={handleConfirmSuspend}
-            >
-              <div className="custom-modal-header">
-                <h3>🚫 Xác nhận Đình chỉ bài thi (0 điểm)</h3>
-                <button
-                  type="button"
-                  className="custom-modal-close"
-                  disabled={suspendSubmitting}
-                  onClick={() => setSuspendTarget(null)}
-                  aria-label="Đóng"
-                >
-                  ✕
-                </button>
-              </div>
+      <SuspendExamModal
+        target={suspendTarget}
+        reason={suspendReason}
+        onReasonChange={setSuspendReason}
+        submitting={suspendSubmitting}
+        onClose={() => setSuspendTarget(null)}
+        onSubmit={handleConfirmSuspend}
+      />
 
-              <div className="suspend-student-info">
-                <div>
-                  <strong>{suspendTarget.fullName}</strong>
-                  {suspendTarget.studentCode ? ` • Mã SV: ${suspendTarget.studentCode}` : ""}
-                </div>
-                <span>0.00 điểm</span>
-              </div>
-
-              <div className="form-field">
-                <label>Chọn nhanh lý do phổ biến</label>
-                <div className="quick-reason-chips">
-                  {QUICK_SUSPEND_REASONS.map((reason) => (
-                    <button
-                      key={reason}
-                      type="button"
-                      className={`quick-reason-chip ${
-                        suspendReason === reason ? "active" : ""
-                      }`}
-                      onClick={() => setSuspendReason(reason)}
-                    >
-                      {reason}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="form-field">
-                <label>Lý do chi tiết *</label>
-                <textarea
-                  rows={3}
-                  value={suspendReason}
-                  onChange={(e) => setSuspendReason(e.target.value)}
-                  placeholder="Nhập lý do đình chỉ bài thi..."
-                  required
-                />
-              </div>
-
-              <div className="custom-modal-footer">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={suspendSubmitting}
-                  onClick={() => setSuspendTarget(null)}
-                >
-                  Hủy bỏ
-                </button>
-                <button
-                  type="submit"
-                  className="btn-danger-solid"
-                  disabled={suspendSubmitting}
-                >
-                  {suspendSubmitting ? "Đang xử lý..." : "🚫 Xác nhận đình chỉ (0đ)"}
-                </button>
-              </div>
-            </form>
-          </div>,
-          document.body
-        )}
-
-      {reopenTarget &&
-        createPortal(
-          <div
-            className="custom-modal-backdrop"
-            onClick={() => !reopenSubmitting && setReopenTarget(null)}
-          >
-            <div
-              className="custom-modal-card"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Xác nhận Gỡ vi phạm và Mở lại lượt thi"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="custom-modal-header">
-                <h3>🔓 Xác nhận Gỡ vi phạm & Mở lại lượt thi</h3>
-                <button
-                  type="button"
-                  className="custom-modal-close"
-                  disabled={reopenSubmitting}
-                  onClick={() => setReopenTarget(null)}
-                  aria-label="Đóng"
-                >
-                  ✕
-                </button>
-              </div>
-
-              <div
-                className="zalo-appeal-box"
-                style={{ gap: "6px", padding: "12px 14px" }}
-              >
-                <div style={{ color: "#ffffff", fontWeight: 700, fontSize: "0.9rem" }}>
-                  👤 {reopenTarget.fullName}
-                  {reopenTarget.studentCode ? ` • Mã SV: ${reopenTarget.studentCode}` : ""}
-                </div>
-                {reopenTarget.examTitle && (
-                  <div style={{ color: "#7dd3fc", fontSize: "0.84rem", fontWeight: 600 }}>
-                    📝 Đề thi: {reopenTarget.examTitle}
-                  </div>
-                )}
-              </div>
-
-              <p className="custom-modal-body">
-                Thao tác này sẽ xóa trạng thái vi phạm/đình chỉ hiện tại và cấp lại 1 lượt làm bài mới cho sinh viên.
-              </p>
-
-              <div className="custom-modal-footer">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={reopenSubmitting}
-                  onClick={() => setReopenTarget(null)}
-                >
-                  Hủy bỏ
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  disabled={reopenSubmitting}
-                  onClick={handleConfirmReopen}
-                >
-                  {reopenSubmitting ? "Đang xử lý..." : "🔓 Xác nhận mở lại lượt"}
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body
-        )}
+      <ReopenAttemptModal
+        target={reopenTarget}
+        submitting={reopenSubmitting}
+        onClose={() => setReopenTarget(null)}
+        onConfirm={handleConfirmReopen}
+      />
     </div>
   );
 }

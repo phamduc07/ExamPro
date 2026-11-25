@@ -125,7 +125,7 @@ export async function submitExam(req, res, next) {
     await connection.beginTransaction();
 
     const [attemptRows] = await connection.query(
-      `SELECT started_at, status, is_suspended, suspend_reason FROM exam_attempts
+      `SELECT started_at, status, is_suspended, suspend_reason, tab_switch_count FROM exam_attempts
        WHERE exam_id = ? AND user_id = ?
        FOR UPDATE`,
       [Number(examId), req.user.id]
@@ -182,6 +182,11 @@ export async function submitExam(req, res, next) {
       resolvedStartedAt = new Date(Date.now() - safeTimeSpent * 1000);
     }
 
+    const serverTabSwitchCount =
+      attemptRows.length > 0
+        ? Math.max(0, Number(attemptRows[0].tab_switch_count) || 0)
+        : 0;
+
     const [result] = await connection.query(
       `INSERT INTO submissions
         (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, answers_json)
@@ -194,7 +199,7 @@ export async function submitExam(req, res, next) {
         totalQuestions,
         safeTimeSpent,
         resolvedStartedAt,
-        safeTabSwitchCount,
+        serverTabSwitchCount,
         JSON.stringify(answers),
       ]
     );
@@ -590,6 +595,89 @@ export async function unsuspendSubmission(req, res, next) {
     return res.status(200).json({
       success: true,
       message: "Đã mở lại lượt thi cho sinh viên thành công!",
+    });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+export async function recordExamViolation(req, res, next) {
+  let connection;
+  try {
+    const examId = Number(req.params.id);
+    if (!isId(examId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Mã đề thi không hợp lệ.",
+      });
+    }
+
+    const reason = String(req.body?.reason || "Rời tab / Vi phạm quy chế")
+      .trim()
+      .slice(0, 255);
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [exams] = await connection.query(
+      "SELECT id, max_tab_switches, anti_cheat FROM exams WHERE id = ?",
+      [examId]
+    );
+    if (!exams.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy đề thi.",
+      });
+    }
+
+    await connection.query(
+      `INSERT INTO exam_attempts
+        (exam_id, user_id, started_at, status, tab_switch_count, last_violation_at, last_violation_reason)
+       VALUES (?, ?, NOW(), 'IN_PROGRESS', 1, NOW(), ?)
+       ON DUPLICATE KEY UPDATE
+         tab_switch_count = tab_switch_count + 1,
+         last_violation_at = NOW(),
+         last_violation_reason = VALUES(last_violation_reason)`,
+      [examId, req.user.id, reason]
+    );
+
+    const [attemptRows] = await connection.query(
+      `SELECT tab_switch_count, is_suspended, status
+       FROM exam_attempts
+       WHERE exam_id = ? AND user_id = ?
+       FOR UPDATE`,
+      [examId, req.user.id]
+    );
+
+    const tabSwitchCount = Math.max(
+      0,
+      Number(attemptRows[0]?.tab_switch_count) || 0
+    );
+    const hasTabLimit =
+      exams[0].max_tab_switches !== null &&
+      exams[0].max_tab_switches !== undefined;
+    const maxAllowed = hasTabLimit ? Number(exams[0].max_tab_switches) : null;
+    const forceSubmit = hasTabLimit && tabSwitchCount > maxAllowed;
+
+    if (forceSubmit) {
+      await connection.query(
+        "UPDATE exam_attempts SET status = 'COMPLETED' WHERE exam_id = ? AND user_id = ?",
+        [examId, req.user.id]
+      );
+    }
+
+    await connection.commit();
+    return res.status(200).json({
+      success: true,
+      data: {
+        tabSwitchCount,
+        maxTabSwitches: maxAllowed,
+        forceSubmit,
+      },
     });
   } catch (error) {
     if (connection) await connection.rollback();

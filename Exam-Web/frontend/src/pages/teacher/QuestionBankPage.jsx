@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
 import { useDialog } from "../../context/DialogContext";
+import QuickSubjectModal from "../../components/questions/QuickSubjectModal";
 import {
   parseBulkQuestions,
   SAMPLE_BULK_QUESTIONS,
@@ -1295,109 +1296,15 @@ export default function QuestionBankPage() {
         </>
       )}
 
-      {showQuickSubjectModal &&
-        createPortal(
-          <div
-            className="bulk-modal-backdrop"
-            style={{ zIndex: 10050 }}
-            onClick={closeQuickSubjectModal}
-          >
-            <div
-              className="bulk-modal-card quick-subject-modal-card"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Thêm môn học mới"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="bulk-modal-header">
-                <div>
-                  <span className="section-badge">DANH MỤC HỌC PHẦN</span>
-                  <h2>➕ Thêm môn học mới</h2>
-                </div>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={closeQuickSubjectModal}
-                  disabled={quickSubjectSaving}
-                >
-                  ✕ Đóng
-                </button>
-              </div>
-
-              {quickSubjectError && (
-                <div className="alert-box alert-error">⚠️ {quickSubjectError}</div>
-              )}
-
-              <form onSubmit={handleQuickCreateSubject} className="admin-form">
-                <div className="form-field">
-                  <label htmlFor="quick-sub-code">Mã môn học *</label>
-                  <input
-                    id="quick-sub-code"
-                    type="text"
-                    placeholder="VD: BAS1150 hoặc INT1408"
-                    value={quickSubjectForm.code}
-                    onChange={(e) =>
-                      setQuickSubjectForm((p) => ({
-                        ...p,
-                        code: e.target.value.toUpperCase(),
-                      }))
-                    }
-                    required
-                  />
-                </div>
-
-                <div className="form-field">
-                  <label htmlFor="quick-sub-name">Tên môn học *</label>
-                  <input
-                    id="quick-sub-name"
-                    type="text"
-                    placeholder="VD: Triết học Mác - Lênin"
-                    value={quickSubjectForm.name}
-                    onChange={(e) =>
-                      setQuickSubjectForm((p) => ({ ...p, name: e.target.value }))
-                    }
-                    required
-                  />
-                </div>
-
-                <div className="form-field">
-                  <label htmlFor="quick-sub-desc">Mô tả ngắn (tùy chọn)</label>
-                  <input
-                    id="quick-sub-desc"
-                    type="text"
-                    placeholder="Nhập mô tả tóm tắt học phần..."
-                    value={quickSubjectForm.description}
-                    onChange={(e) =>
-                      setQuickSubjectForm((p) => ({
-                        ...p,
-                        description: e.target.value,
-                      }))
-                    }
-                  />
-                </div>
-
-                <div className="bulk-modal-footer">
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={closeQuickSubjectModal}
-                    disabled={quickSubjectSaving}
-                  >
-                    Hủy
-                  </button>
-                  <button
-                    type="submit"
-                    className="btn-primary"
-                    disabled={quickSubjectSaving}
-                  >
-                    {quickSubjectSaving ? "Đang lưu..." : "💾 Lưu môn học"}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>,
-          document.body
-        )}
+      <QuickSubjectModal
+        open={showQuickSubjectModal}
+        form={quickSubjectForm}
+        onChange={setQuickSubjectForm}
+        error={quickSubjectError}
+        saving={quickSubjectSaving}
+        onClose={closeQuickSubjectModal}
+        onSubmit={handleQuickCreateSubject}
+      />
     </div>
   );
 }

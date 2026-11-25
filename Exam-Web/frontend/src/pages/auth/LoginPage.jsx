@@ -24,7 +24,7 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const [forgotStep, setForgotStep] = useState(0); // 0 = off, 1 = enter email, 2 = enter otp + new password
+  const [forgotStep, setForgotStep] = useState(0);
   const [forgotEmail, setForgotEmail] = useState("");
   const [resetOtp, setResetOtp] = useState("");
   const [resetNewPassword, setResetNewPassword] = useState("");

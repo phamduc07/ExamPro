@@ -13,12 +13,14 @@ import {
   forceChangePassword,
   forgotPassword,
   resetPassword,
+} from "../controllers/authController.js";
+import {
   getStudentsForAdmin,
   unlockUser,
   getAdmins,
   createAdmin,
   revokeAdmin,
-} from "../controllers/authController.js";
+} from "../controllers/userController.js";
 import { chat } from "../controllers/chatController.js";
 import {
   getSubjects,
@@ -50,6 +52,7 @@ import {
   deleteSubmission,
   suspendSubmission,
   unsuspendSubmission,
+  recordExamViolation,
 } from "../controllers/submissionController.js";
 
 const router = express.Router();
@@ -114,6 +117,7 @@ router.get("/exams/admin-overview", verifyToken, requireRole("TEACHER"), getAdmi
 router.get("/exams/admin-logs", verifyToken, requireRole("TEACHER"), getAdminLogs);
 router.get("/exams/:id/leaderboard", verifyToken, requireRole("TEACHER"), getExamLeaderboard);
 router.get("/exams/:id", verifyToken, getExamById);
+router.post("/exams/:id/violation", verifyToken, requireRole("STUDENT"), recordExamViolation);
 router.post("/exams", verifyToken, requireRole("TEACHER"), createExam);
 router.put("/exams/:id", verifyToken, requireRole("TEACHER"), updateExam);
 router.patch("/exams/:id/reopen", verifyToken, requireRole("TEACHER"), reopenExam);

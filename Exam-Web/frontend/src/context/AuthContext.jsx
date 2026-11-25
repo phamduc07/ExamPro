@@ -116,7 +116,7 @@ export function AuthProvider({ children }) {
     try {
       await axiosClient.post("/auth/logout");
     } catch {
-      // ignore network/401 errors during logout
+
     } finally {
       useExamStore.getState().resetExamSession();
       localStorage.removeItem("ptit_exam_token");

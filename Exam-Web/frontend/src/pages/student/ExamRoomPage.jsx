@@ -48,6 +48,7 @@ export default function ExamRoomPage() {
     prevQuestion,
     tickTimer,
     incrementTabSwitch,
+    setTabSwitchCount,
     resetExamSession,
   } = useExamStore();
 
@@ -173,46 +174,68 @@ export default function ExamRoomPage() {
     return () => clearInterval(interval);
   }, [loading, activeExam, questions.length, tickTimer, handleFinalSubmit]);
 
+  const reportViolationToServer = useCallback(
+    async (reason) => {
+      if (submitLockRef.current) return null;
+      const baseUrl = (
+        import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+      ).replace(/\/$/, "");
+      const token = localStorage.getItem("ptit_token");
+      try {
+        const response = await fetch(`${baseUrl}/exams/${id}/violation`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          credentials: "include",
+          keepalive: true,
+          body: JSON.stringify({ reason }),
+        });
+        const json = await response.json().catch(() => null);
+        if (json?.success && json.data) {
+          setTabSwitchCount(json.data.tabSwitchCount);
+          if (json.data.forceSubmit) {
+            if (autoSubmitTimerRef.current) {
+              clearTimeout(autoSubmitTimerRef.current);
+              autoSubmitTimerRef.current = null;
+            }
+            setAntiCheatWarning(
+              `🚨 Bạn đã vi phạm quá giới hạn (${json.data.tabSwitchCount}/${json.data.maxTabSwitches}). Hệ thống đang tự động thu bài!`
+            );
+            handleFinalSubmit(true, "tabLimit");
+          }
+          return json.data;
+        }
+      } catch {
+        return null;
+      }
+      return null;
+    },
+    [id, setTabSwitchCount, handleFinalSubmit]
+  );
+
   useEffect(() => {
     if (loading || !activeExam) return;
 
-    const recordTabLeave = () => {
+    const recordTabLeave = (reason = "Rời tab / Chuyển cửa sổ") => {
       if (submitLockRef.current) return;
       const now = Date.now();
       if (now - lastTabSwitchRef.current < 500) return;
       lastTabSwitchRef.current = now;
       incrementTabSwitch();
-
-      const hasTabLimit =
-        activeExam.max_tab_switches !== null &&
-        activeExam.max_tab_switches !== undefined;
-      const maxAllowed = hasTabLimit ? Number(activeExam.max_tab_switches) : null;
-      const nextCount = useExamStore.getState().tabSwitchCount;
-      if (hasTabLimit && nextCount > maxAllowed) {
-        if (Boolean(activeExam.anti_cheat)) {
-          if (!autoSubmitTimerRef.current) {
-            setAntiCheatWarning(
-              `🚨 Bạn đã vi phạm quá giới hạn (${nextCount}/${maxAllowed}). Hệ thống sẽ tự động nộp bài sau 3 giây!`
-            );
-            autoSubmitTimerRef.current = setTimeout(() => {
-              handleFinalSubmit(true, "tabLimit");
-            }, 3000);
-          }
-        } else {
-          handleFinalSubmit(true, "tabLimit");
-        }
-      }
+      reportViolationToServer(reason);
     };
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        recordTabLeave();
+        recordTabLeave("Rời tab trình duyệt");
       }
     };
 
     const handleWindowBlur = () => {
       if (Date.now() < ignoreBlurUntilRef.current) return;
-      recordTabLeave();
+      recordTabLeave("Chuyển sang cửa sổ khác");
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -226,7 +249,7 @@ export default function ExamRoomPage() {
         autoSubmitTimerRef.current = null;
       }
     };
-  }, [loading, activeExam, incrementTabSwitch, handleFinalSubmit]);
+  }, [loading, activeExam, incrementTabSwitch, reportViolationToServer]);
 
   const requestExamFullscreen = useCallback(() => {
     if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
@@ -251,20 +274,7 @@ export default function ExamRoomPage() {
       lastTabSwitchRef.current = now;
       incrementTabSwitch();
       setAntiCheatWarning(`🚨 Cảnh báo Anti-Cheat: ${reasonText}`);
-
-      const hasTabLimit =
-        activeExam.max_tab_switches !== null &&
-        activeExam.max_tab_switches !== undefined;
-      const maxAllowed = hasTabLimit ? Number(activeExam.max_tab_switches) : null;
-      const nextCount = useExamStore.getState().tabSwitchCount;
-      if (hasTabLimit && nextCount > maxAllowed && !autoSubmitTimerRef.current) {
-        setAntiCheatWarning(
-          `🚨 Bạn đã vi phạm quá giới hạn (${nextCount}/${maxAllowed}). Hệ thống sẽ tự động nộp bài sau 3 giây!`
-        );
-        autoSubmitTimerRef.current = setTimeout(() => {
-          handleFinalSubmit(true, "tabLimit");
-        }, 3000);
-      }
+      reportViolationToServer(reasonText);
     };
 
     const blockEvent = (e) => {
@@ -324,7 +334,7 @@ export default function ExamRoomPage() {
       window.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
     };
-  }, [loading, activeExam, incrementTabSwitch, handleFinalSubmit]);
+  }, [loading, activeExam, incrementTabSwitch, reportViolationToServer]);
 
   if (loading || !activeExam) {
     return (

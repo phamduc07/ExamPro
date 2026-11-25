@@ -68,6 +68,11 @@ export const useExamStore = create(persist((set, get) => ({
       tabSwitchCount: (state.tabSwitchCount || 0) + 1,
     })),
 
+  setTabSwitchCount: (count) =>
+    set({
+      tabSwitchCount: Math.max(0, Number(count) || 0),
+    }),
+
   selectAnswer: (questionId, optionKey) =>
     set((state) => state.deadline <= Date.now() ? {} : ({
       answers: {

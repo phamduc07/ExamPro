@@ -184,6 +184,9 @@ export async function initializeDatabase() {
       status ENUM('IN_PROGRESS', 'COMPLETED') NOT NULL DEFAULT 'IN_PROGRESS',
       is_suspended TINYINT(1) NOT NULL DEFAULT 0,
       suspend_reason VARCHAR(255) DEFAULT NULL,
+      tab_switch_count INT NOT NULL DEFAULT 0,
+      last_violation_at DATETIME DEFAULT NULL,
+      last_violation_reason VARCHAR(255) DEFAULT NULL,
       UNIQUE KEY uq_exam_attempt (exam_id, user_id),
       CONSTRAINT fk_attempt_exam FOREIGN KEY (exam_id)
         REFERENCES exams(id) ON DELETE CASCADE,
@@ -572,6 +575,7 @@ export async function initializeDatabase() {
   }
 
   await syncExclusiveAdmin(adminEmail, adminPassword);
+  await syncDemoStudent();
 }
 
 async function ensureSchemaColumns() {
@@ -665,6 +669,15 @@ async function ensureSchemaColumns() {
     "ALTER TABLE exam_attempts ADD COLUMN suspend_reason VARCHAR(255) DEFAULT NULL AFTER is_suspended"
   );
   await safeAlter(
+    "ALTER TABLE exam_attempts ADD COLUMN tab_switch_count INT NOT NULL DEFAULT 0 AFTER suspend_reason"
+  );
+  await safeAlter(
+    "ALTER TABLE exam_attempts ADD COLUMN last_violation_at DATETIME DEFAULT NULL AFTER tab_switch_count"
+  );
+  await safeAlter(
+    "ALTER TABLE exam_attempts ADD COLUMN last_violation_reason VARCHAR(255) DEFAULT NULL AFTER last_violation_at"
+  );
+  await safeAlter(
     "ALTER TABLE password_resets ADD COLUMN failed_attempts INT NOT NULL DEFAULT 0 AFTER expires_at"
   );
   await safeAlter(
@@ -707,4 +720,26 @@ async function syncExclusiveAdmin(adminEmail, adminPassword) {
     );
   }
   console.log(`✅ Đã đồng bộ tài khoản Super Admin: ${adminEmail}`);
+}
+
+async function syncDemoStudent() {
+  const demoEmail = "sinhvien@ptit.edu.vn";
+  const [rows] = await pool.query("SELECT id FROM users WHERE email = ? LIMIT 1", [
+    demoEmail,
+  ]);
+  if (rows.length > 0) return;
+
+  const demoHash = await bcrypt.hash("Student@123", 10);
+  await pool.query(
+    `INSERT INTO users (full_name, email, password_hash, role, student_code, major_group, failed_login_attempts, locked_until)
+     VALUES (?, ?, ?, 'STUDENT', ?, 'KY_THUAT', 0, NULL)
+     ON DUPLICATE KEY UPDATE
+       full_name = VALUES(full_name),
+       password_hash = VALUES(password_hash),
+       role = 'STUDENT',
+       failed_login_attempts = 0,
+       locked_until = NULL`,
+    ["Nguyễn Văn Demo", demoEmail, demoHash, "B25DCCC999"]
+  );
+  console.log(`✅ Đã khởi tạo tài khoản Sinh viên mẫu: ${demoEmail}`);
 }
