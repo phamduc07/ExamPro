@@ -1,5 +1,9 @@
 import { pool } from "../config/db.js";
 import { isId, isText, validateQuestion } from "../utils/validation.js";
+import {
+  parseAttemptBlueprint,
+  gradeAnswersWithBlueprint,
+} from "../utils/examBlueprint.js";
 
 export async function getSubjects(req, res, next) {
   try {
@@ -365,9 +369,16 @@ export async function updateQuestion(req, res, next) {
       "SELECT DISTINCT exam_id FROM exam_questions WHERE question_id = ?",
       [id]
     );
-    const examIds = examLinks.map((row) => row.exam_id);
+    const [subjectExamRows] = await connection.query(
+      "SELECT id FROM exams WHERE subject_id = ?",
+      [existingRows[0].subject_id]
+    );
+    const linkedExamIds = examLinks.map((row) => Number(row.exam_id));
+    const candidateExamIds = Array.from(
+      new Set([...linkedExamIds, ...subjectExamRows.map((r) => Number(r.id))])
+    );
 
-    if (examIds.length > 0 && Number(subjectId) !== Number(existingRows[0].subject_id)) {
+    if (linkedExamIds.length > 0 && Number(subjectId) !== Number(existingRows[0].subject_id)) {
       await connection.rollback();
       return res.status(400).json({
         success: false,
@@ -394,8 +405,18 @@ export async function updateQuestion(req, res, next) {
       ]
     );
 
+    const [subjectQuestions] = await connection.query(
+      "SELECT id, correct_answer FROM questions WHERE subject_id = ?",
+      [Number(subjectId)]
+    );
+    const subjectQuestionsMap = new Map(
+      subjectQuestions.map((q) => [Number(q.id), q])
+    );
+
     let regradedSubmissionsCount = 0;
-    for (const examId of examIds) {
+    const touchedExamIds = new Set(linkedExamIds);
+
+    for (const examId of candidateExamIds) {
       const [examQuestions] = await connection.query(
         `SELECT q.id, q.correct_answer
          FROM exam_questions eq
@@ -403,15 +424,26 @@ export async function updateQuestion(req, res, next) {
          WHERE eq.exam_id = ?`,
         [examId]
       );
-      const totalQuestions = examQuestions.length;
-      if (totalQuestions === 0) continue;
+      const isDirectlyLinked = linkedExamIds.includes(examId);
 
       const [submissions] = await connection.query(
-        "SELECT id, is_suspended, answers_json FROM submissions WHERE exam_id = ? FOR UPDATE",
+        "SELECT id, is_suspended, answers_json, attempt_blueprint_json FROM submissions WHERE exam_id = ? FOR UPDATE",
         [examId]
       );
 
       for (const sub of submissions) {
+        const bp = parseAttemptBlueprint(sub.attempt_blueprint_json);
+        const bpContainsQuestion = bp
+          ? bp.items.some((it) => Number(it.questionId) === Number(id))
+          : false;
+
+        if (!bp && !isDirectlyLinked) continue;
+        if (bp && !bpContainsQuestion) continue;
+
+        touchedExamIds.add(examId);
+        const totalQuestions = bp ? bp.items.length : examQuestions.length;
+        if (totalQuestions === 0) continue;
+
         if (Number(sub.is_suspended) === 1) {
           await connection.query(
             "UPDATE submissions SET score = 0, correct_count = 0, total_questions = ? WHERE id = ?",
@@ -426,13 +458,24 @@ export async function updateQuestion(req, res, next) {
             : sub.answers_json || {};
 
         let correctCount = 0;
-        for (const q of examQuestions) {
-          const choice = parsedAnswers[q.id] || parsedAnswers[String(q.id)];
-          if (choice && choice === q.correct_answer) {
-            correctCount++;
+        let score = 0;
+        if (bp) {
+          const graded = gradeAnswersWithBlueprint(
+            bp,
+            subjectQuestionsMap,
+            parsedAnswers
+          );
+          correctCount = graded.correctCount;
+          score = graded.score;
+        } else {
+          for (const q of examQuestions) {
+            const choice = parsedAnswers[q.id] || parsedAnswers[String(q.id)];
+            if (choice && choice === q.correct_answer) {
+              correctCount++;
+            }
           }
+          score = Number(((correctCount / totalQuestions) * 10).toFixed(2));
         }
-        const score = Number(((correctCount / totalQuestions) * 10).toFixed(2));
 
         await connection.query(
           "UPDATE submissions SET score = ?, correct_count = ?, total_questions = ? WHERE id = ?",
@@ -442,7 +485,7 @@ export async function updateQuestion(req, res, next) {
       }
     }
 
-    const syncedExamsCount = examIds.length;
+    const syncedExamsCount = touchedExamIds.size;
     await connection.query(
       `INSERT INTO admin_logs (admin_id, admin_name, action_type, exam_title, subject_code, details)
        VALUES (?, ?, 'UPDATE_QUESTION_REGRADE', ?, ?, ?)`,
@@ -484,7 +527,23 @@ export async function deleteQuestion(req, res, next) {
     const { id } = req.params;
     const [linked] = await pool.query("SELECT id FROM exam_questions WHERE question_id = ? LIMIT 1", [id]);
     if (linked.length) {
-      return res.status(409).json({ success: false, message: "Câu hỏi đang thuộc đề thi nên không thể sửa/xóa. Hãy tạo câu hỏi mới hoặc gỡ khỏi đề chưa có bài nộp." });
+      return res.status(409).json({
+        success: false,
+        message: "Câu hỏi đang thuộc đề thi nên không thể sửa/xóa. Hãy tạo câu hỏi mới hoặc gỡ khỏi đề chưa có bài nộp.",
+      });
+    }
+    const [usedInSub] = await pool.query(
+      `SELECT id FROM submissions
+       WHERE attempt_blueprint_json IS NOT NULL
+         AND JSON_CONTAINS(JSON_EXTRACT(attempt_blueprint_json, '$.items[*].questionId'), CAST(? AS JSON))
+       LIMIT 1`,
+      [Number(id)]
+    );
+    if (usedInSub.length) {
+      return res.status(409).json({
+        success: false,
+        message: "Câu hỏi đã xuất hiện trong bài thi của sinh viên nên không thể xóa.",
+      });
     }
     const [result] = await pool.query("DELETE FROM questions WHERE id = ?", [id]);
 

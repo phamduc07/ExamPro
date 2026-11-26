@@ -3,7 +3,10 @@ import dns from "node:dns/promises";
 import bcrypt from "bcryptjs";
 import { pool } from "../config/db.js";
 import { isText } from "../utils/validation.js";
-import { invalidateTokenVersionCache } from "../middlewares/authMiddleware.js";
+import {
+  invalidateTokenVersionCache,
+  clearAuthCookie,
+} from "../middlewares/authMiddleware.js";
 import { sendNewAdminCredentialsEmail, sendPromoteAdminEmail } from "../utils/mailer.js";
 import { parsePtitEmail, KY_THUAT_MAJORS, KINH_TE_MAJORS } from "../utils/ptitHelper.js";
 
@@ -190,10 +193,11 @@ export async function createAdmin(req, res, next) {
       if (nextFails >= MAX_SUPER_ADMIN_CONFIRM_FAILS) {
         superAdminPwdFailures.delete(req.user.id);
         await pool.query(
-          "UPDATE users SET token_version = token_version + 1 WHERE id = ?",
+          "UPDATE users SET token_version = token_version + 1, active_session_id = NULL WHERE id = ?",
           [req.user.id]
         );
         invalidateTokenVersionCache(req.user.id);
+        clearAuthCookie(res);
         return res.status(400).json({
           success: false,
           forceLogout: true,
@@ -239,7 +243,7 @@ export async function createAdmin(req, res, next) {
         `UPDATE users
          SET role = 'TEACHER', is_super_admin = 0,
              first_login_approved = 0, pending_first_login = 0,
-             must_change_password = 0, token_version = token_version + 1
+             must_change_password = 0, token_version = token_version + 1, active_session_id = NULL
          WHERE id = ?`,
         [existingUser.id]
       );
@@ -472,7 +476,8 @@ export async function revokeAdmin(req, res, next) {
            must_change_password = 0,
            student_code = ?,
            major_group = ?,
-           token_version = token_version + 1
+           token_version = token_version + 1,
+           active_session_id = NULL
        WHERE id = ?`,
       [preservedStudentCode, preservedMajorGroup, targetId]
     );

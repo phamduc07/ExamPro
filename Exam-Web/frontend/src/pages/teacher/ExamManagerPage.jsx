@@ -4,6 +4,10 @@ import axiosClient from "../../api/axiosClient";
 import { useDialog } from "../../context/DialogContext";
 import { MAJOR_GROUP_LABELS } from "../../utils/ptitHelper";
 import ExamPreviewModal from "../../components/exam/ExamPreviewModal";
+import AnomalyInspectorBar, {
+  AnomalyBadges,
+  filterRowsByAnomaly,
+} from "../../components/exam/AnomalyInspectorBar";
 
 const EXAM_DRAFT_KEY = "ptit_exam_draft";
 const DURATION_PRESETS = [15, 30, 45, 60, 90, 120];
@@ -67,8 +71,8 @@ const emptyExam = {
   majorGroup: "ALL",
   examSession: "",
   examShift: "",
-  shuffleQuestions: 0,
-  shuffleOptions: 0,
+  shuffleQuestions: 1,
+  shuffleOptions: 1,
   antiCheat: 0,
   maxTabSwitches: null,
   maxAttempts: null,
@@ -87,6 +91,11 @@ export default function ExamManagerPage() {
   const [subjects, setSubjects] = useState([]);
   const [questions, setQuestions] = useState([]);
   const [submissions, setSubmissions] = useState([]);
+  const [anomalyMeta, setAnomalyMeta] = useState({
+    suspiciousPairs: [],
+    anomalySummary: null,
+  });
+  const [anomalyFilter, setAnomalyFilter] = useState("ALL");
 
   const [form, setForm] = useState(() => {
     try {
@@ -324,6 +333,9 @@ export default function ExamManagerPage() {
       setSubjects(subList);
       setQuestions(qRes.data.data || []);
       setSubmissions(sumRes.data.data || []);
+      setAnomalyMeta(
+        sumRes.data.meta || { suspiciousPairs: [], anomalySummary: null }
+      );
 
       if (subList.length > 0) {
         setForm((prev) => (prev.subjectId ? prev : { ...prev, subjectId: subList[0].id }));
@@ -404,6 +416,18 @@ export default function ExamManagerPage() {
     const byId = new Map(questions.map((q) => [q.id, q]));
     return form.questionIds.map((id) => byId.get(id)).filter(Boolean);
   }, [questions, form.questionIds]);
+
+  const selectedDifficultyMatrix = useMemo(() => {
+    let easy = 0;
+    let medium = 0;
+    let hard = 0;
+    for (const q of selectedQuestionObjects) {
+      if (q.difficulty === "EASY") easy++;
+      else if (q.difficulty === "HARD") hard++;
+      else medium++;
+    }
+    return { easy, medium, hard };
+  }, [selectedQuestionObjects]);
 
   const moveSelectedQuestion = (index, direction) => {
     if (isLockedQuestions) return;
@@ -573,6 +597,9 @@ export default function ExamManagerPage() {
 
     const payload = {
       ...form,
+      easyCount: selectedDifficultyMatrix.easy,
+      mediumCount: selectedDifficultyMatrix.medium,
+      hardCount: selectedDifficultyMatrix.hard,
       sessionMode: editingId ? "FREE" : sessionMode,
       examSession: !editingId && sessionMode === "FREE" ? "" : form.examSession,
       examShift: !editingId && sessionMode === "FREE" ? "" : form.examShift,
@@ -1263,6 +1290,14 @@ export default function ExamManagerPage() {
                       📋 Chọn câu hỏi đưa vào đề ({form.questionIds.length} /{" "}
                       {availableQuestions.length} câu đã chọn)
                     </strong>
+                    {selectedQuestionObjects.length > 0 && (
+                      <div className="sub-text" style={{ marginTop: "4px", color: "#93c5fd" }}>
+                        🎲 Cơ cấu rút ngẫu nhiên cho từng SV:{" "}
+                        <strong>{selectedDifficultyMatrix.easy} Dễ</strong> •{" "}
+                        <strong>{selectedDifficultyMatrix.medium} Trung bình</strong> •{" "}
+                        <strong>{selectedDifficultyMatrix.hard} Khó</strong> (tự động trộn câu &amp; 4 đáp án A/B/C/D theo từng lượt thi)
+                      </div>
+                    )}
                     {isSessionLocked && (
                       <div
                         className="sub-text"
@@ -1584,13 +1619,21 @@ export default function ExamManagerPage() {
             <h2>Bảng điểm toàn bộ lượt thi của Sinh viên ({submissions.length})</h2>
           </div>
 
+          <AnomalyInspectorBar
+            summary={anomalyMeta.anomalySummary}
+            suspiciousPairs={anomalyMeta.suspiciousPairs || []}
+            activeFilter={anomalyFilter}
+            onFilterChange={setAnomalyFilter}
+            totalCount={submissions.length}
+          />
+
           <div className="table-responsive">
             <table className="data-table">
               <thead>
                 <tr>
                   <th>Mã SV</th>
-                  <th>Họ tên Sinh viên</th>
-                  <th>Đề thi & Môn học</th>
+                  <th>Họ tên &amp; Cảnh báo</th>
+                  <th>Đề thi &amp; Môn học</th>
                   <th>Số câu đúng</th>
                   <th>Điểm số</th>
                   <th>Giám sát thi</th>
@@ -1599,12 +1642,15 @@ export default function ExamManagerPage() {
                 </tr>
               </thead>
               <tbody>
-                {submissions.map((sub) => {
+                {filterRowsByAnomaly(submissions, anomalyFilter).map((sub) => {
                   const score = Number(sub.score);
                   const tabSwitches = Math.max(0, Number(sub.tab_switch_count) || 0);
                   const unfocusedSec = Math.max(0, Number(sub.unfocused_seconds) || 0);
                   return (
-                    <tr key={sub.id}>
+                    <tr
+                      key={sub.id}
+                      className={sub.is_anomalous ? "anomalous-row" : ""}
+                    >
                       <td>
                         <span className="code-badge">
                           {sub.student_code || "SV"}
@@ -1613,6 +1659,7 @@ export default function ExamManagerPage() {
                       <td>
                         <strong>{sub.student_name}</strong>
                         <div className="sub-text">{sub.student_email}</div>
+                        <AnomalyBadges row={sub} />
                       </td>
                       <td>
                         <strong>{sub.exam_title}</strong>

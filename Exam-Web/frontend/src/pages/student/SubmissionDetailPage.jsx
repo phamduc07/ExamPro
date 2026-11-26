@@ -182,12 +182,13 @@ export default function SubmissionDetailPage() {
                 const startedAtIso = detail.started_at
                   ? new Date(detail.started_at).toISOString()
                   : "";
-                const options = detail.shuffle_options
-                  ? seededShuffle(
-                      baseOptions,
-                      `${detail.exam_id}-${q.id}-${startedAtIso}`
-                    )
-                  : baseOptions;
+                const options =
+                  !detail.options_pre_shuffled && detail.shuffle_options
+                    ? seededShuffle(
+                        baseOptions,
+                        `${detail.exam_id}-${q.id}-${startedAtIso}`
+                      )
+                    : baseOptions;
                 const selectedIdx = options.findIndex((o) => o.key === q.selected_option);
                 const selectedDisplayLabel =
                   selectedIdx >= 0 ? displayLabels[selectedIdx] : q.selected_option;

@@ -22,7 +22,16 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [successMessage, setSuccessMessage] = useState(location.state?.successMessage || "");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(() => {
+    try {
+      const kickMsg = sessionStorage.getItem("ptit_auth_kick_notice");
+      if (kickMsg) {
+        sessionStorage.removeItem("ptit_auth_kick_notice");
+        return kickMsg;
+      }
+    } catch {}
+    return "";
+  });
   const [submitting, setSubmitting] = useState(false);
 
   const [forgotStep, setForgotStep] = useState(0);

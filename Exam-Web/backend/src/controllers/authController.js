@@ -3,7 +3,12 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { pool } from "../config/db.js";
 import { isText } from "../utils/validation.js";
-import { invalidateTokenVersionCache } from "../middlewares/authMiddleware.js";
+import {
+  invalidateTokenVersionCache,
+  setAuthCookie,
+  clearAuthCookie,
+} from "../middlewares/authMiddleware.js";
+import { disconnectReplacedUserSockets } from "../socket/proctorSocket.js";
 import {
   OTP_EXPIRE_MINUTES,
   OTP_COOLDOWN_SECONDS,
@@ -74,10 +79,31 @@ function signForceChangePasswordToken(user) {
   );
 }
 
-function signUserToken(user) {
+function signUserToken(user, sessionId) {
   const secret = process.env.JWT_SECRET;
   const expiresIn = process.env.JWT_EXPIRES_IN || "4h";
-  return jwt.sign(formatUserPayload(user), secret, { expiresIn });
+  return jwt.sign(
+    {
+      ...formatUserPayload(user),
+      sessionId,
+      session_id: sessionId,
+    },
+    secret,
+    { expiresIn }
+  );
+}
+
+async function issueAuthenticatedSession(res, user) {
+  const sessionId = crypto.randomUUID();
+  await pool.query("UPDATE users SET active_session_id = ? WHERE id = ?", [
+    sessionId,
+    user.id,
+  ]);
+  invalidateTokenVersionCache(user.id);
+  disconnectReplacedUserSockets(user.id, sessionId);
+  const token = signUserToken(user, sessionId);
+  setAuthCookie(res, token);
+  return { token, sessionId };
 }
 
 export async function sendRegisterOtp(req, res, next) {
@@ -269,7 +295,7 @@ export async function register(req, res, next) {
       major_group: parsed.majorGroup,
     };
 
-    const token = signUserToken(newUser);
+    const { token } = await issueAuthenticatedSession(res, newUser);
 
     return res.status(201).json({
       success: true,
@@ -498,7 +524,7 @@ export async function login(req, res, next) {
       });
     }
 
-    const token = signUserToken(user);
+    const { token } = await issueAuthenticatedSession(res, user);
 
     return res.status(200).json({
       success: true,
@@ -634,7 +660,7 @@ export async function verifyAdminLoginOtp(req, res, next) {
       });
     }
 
-    const token = signUserToken(user);
+    const { token } = await issueAuthenticatedSession(res, user);
     return res.status(200).json({
       success: true,
       message: "Xác thực OTP thành công! Chào mừng Quản trị viên.",
@@ -700,12 +726,13 @@ export async function checkAdminApprovalStatus(req, res, next) {
           },
         });
       }
+      const { token } = await issueAuthenticatedSession(res, user);
       return res.status(200).json({
         success: true,
         message: "Super Admin đã phê duyệt! Đang chuyển vào hệ thống...",
         data: {
           approved: true,
-          token: signUserToken(user),
+          token,
           user: formatUserPayload(user),
         },
       });
@@ -839,10 +866,12 @@ export async function getMe(req, res, next) {
 export async function logout(req, res, next) {
   try {
     await pool.query(
-      "UPDATE users SET token_version = token_version + 1 WHERE id = ?",
+      "UPDATE users SET token_version = token_version + 1, active_session_id = NULL WHERE id = ?",
       [req.user.id]
     );
     invalidateTokenVersionCache(req.user.id);
+    disconnectReplacedUserSockets(req.user.id, null);
+    clearAuthCookie(res);
     return res.status(200).json({
       success: true,
       message: "Đăng xuất và thu hồi phiên đăng nhập thành công!",
@@ -883,10 +912,11 @@ export async function changePassword(req, res, next) {
 
     const nextHash = await bcrypt.hash(newPassword, 10);
     await pool.query(
-      "UPDATE users SET password_hash = ?, token_version = token_version + 1 WHERE id = ?",
+      "UPDATE users SET password_hash = ?, token_version = token_version + 1, active_session_id = NULL WHERE id = ?",
       [nextHash, req.user.id]
     );
     invalidateTokenVersionCache(req.user.id);
+    clearAuthCookie(res);
 
     return res.status(200).json({
       success: true,
@@ -1032,7 +1062,7 @@ export async function resetPassword(req, res, next) {
     await pool.query(
       `UPDATE users
        SET password_hash = ?, must_change_password = 0, token_version = token_version + 1,
-           failed_login_attempts = 0, locked_until = NULL
+           active_session_id = NULL, failed_login_attempts = 0, locked_until = NULL
        WHERE email = ?`,
       [nextHash, normalizedEmail]
     );
@@ -1087,7 +1117,7 @@ export async function forceChangePassword(req, res, next) {
 
     const [rows] = await pool.query("SELECT * FROM users WHERE id = ?", [decoded.id]);
     const updatedUser = rows[0];
-    const token = signUserToken(updatedUser);
+    const { token } = await issueAuthenticatedSession(res, updatedUser);
 
     return res.status(200).json({
       success: true,

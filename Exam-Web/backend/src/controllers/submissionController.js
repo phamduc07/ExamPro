@@ -1,5 +1,22 @@
 import { pool } from "../config/db.js";
 import { isId, isNumber } from "../utils/validation.js";
+import {
+  parseAttemptBlueprint,
+  formatQuestionsWithBlueprint,
+  gradeAnswersWithBlueprint,
+  analyzeSubmissionsAnomalies,
+} from "../utils/examBlueprint.js";
+import {
+  getExamLiveProctoringData,
+  recordViolationWithLog,
+  reviewViolationLog,
+} from "../services/proctorService.js";
+import {
+  emitProctorStudentState,
+  emitProctorViolationNew,
+  emitViolationReviewed,
+  emitStudentSuspended,
+} from "../socket/proctorSocket.js";
 
 const NETWORK_GRACE_SECONDS = 15;
 
@@ -114,20 +131,14 @@ export async function syncExamProgress(req, res, next) {
       });
     }
 
-    const [qRows] = await pool.query(
-      "SELECT question_id FROM exam_questions WHERE exam_id = ?",
-      [examId]
-    );
-    const validIds = new Set(qRows.map((r) => String(r.question_id)));
-    const cleanAnswers = sanitizeAnswersObject(rawAnswers, validIds);
-
     const [attemptRows] = await pool.query(
       `SELECT
          started_at,
          TIMESTAMPDIFF(SECOND, started_at, NOW()) AS elapsed_seconds,
          status,
          is_suspended,
-         tab_switch_count
+         tab_switch_count,
+         attempt_blueprint_json
        FROM exam_attempts
        WHERE exam_id = ? AND user_id = ?
        LIMIT 1`,
@@ -144,6 +155,19 @@ export async function syncExamProgress(req, res, next) {
         data: { synced: false },
       });
     }
+
+    const blueprint = parseAttemptBlueprint(attemptRows[0].attempt_blueprint_json);
+    let validIds;
+    if (blueprint) {
+      validIds = new Set(blueprint.items.map((it) => String(it.questionId)));
+    } else {
+      const [qRows] = await pool.query(
+        "SELECT question_id FROM exam_questions WHERE exam_id = ?",
+        [examId]
+      );
+      validIds = new Set(qRows.map((r) => String(r.question_id)));
+    }
+    const cleanAnswers = sanitizeAnswersObject(rawAnswers, validIds);
 
     const maxDurationSec = (Number(exams[0].duration_minutes) || 30) * 60;
     let effectiveAllowedSec = maxDurationSec;
@@ -300,31 +324,6 @@ export async function submitExam(req, res, next) {
       return res.status(400).json({ success: false, message: "Thời gian làm bài không hợp lệ." });
     }
 
-    const [questions] = await pool.query(
-      `
-      SELECT q.id, q.correct_answer
-      FROM exam_questions eq
-      INNER JOIN questions q ON eq.question_id = q.id
-      WHERE eq.exam_id = ?
-      `,
-      [Number(examId)]
-    );
-
-    if (questions.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Đề thi chưa có câu hỏi nào để chấm điểm.",
-      });
-    }
-
-    const questionIds = new Set(questions.map((q) => String(q.id)));
-    if (Object.keys(answers).some((id) => !questionIds.has(id))) {
-      return res.status(400).json({
-        success: false,
-        message: "Có đáp án cho câu hỏi không thuộc đề thi.",
-      });
-    }
-
     let safeTimeSpent = Number(timeSpentSeconds) || 0;
     const rawStartedAt = started_at ?? startedAt;
     let resolvedStartedAt = null;
@@ -342,7 +341,8 @@ export async function submitExam(req, res, next) {
          suspend_reason,
          tab_switch_count,
          unfocused_seconds,
-         draft_answers_json
+         draft_answers_json,
+         attempt_blueprint_json
        FROM exam_attempts
        WHERE exam_id = ? AND user_id = ?
        FOR UPDATE`,
@@ -396,6 +396,50 @@ export async function submitExam(req, res, next) {
     }
 
     const activeAttempt = attemptRows[0];
+    const activeBlueprint = parseAttemptBlueprint(activeAttempt.attempt_blueprint_json);
+
+    let questions = [];
+    let questionsById = new Map();
+    if (activeBlueprint) {
+      const bpIds = activeBlueprint.items.map((it) => it.questionId);
+      const [bpQRows] = await connection.query(
+        "SELECT id, correct_answer FROM questions WHERE id IN (?)",
+        [bpIds]
+      );
+      questions = bpQRows;
+      questionsById = new Map(bpQRows.map((q) => [Number(q.id), q]));
+    } else {
+      const [eqRows] = await connection.query(
+        `SELECT q.id, q.correct_answer
+         FROM exam_questions eq
+         INNER JOIN questions q ON eq.question_id = q.id
+         WHERE eq.exam_id = ?`,
+        [Number(examId)]
+      );
+      questions = eqRows;
+      questionsById = new Map(eqRows.map((q) => [Number(q.id), q]));
+    }
+
+    if (questions.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "Đề thi chưa có câu hỏi nào để chấm điểm.",
+      });
+    }
+
+    const questionIds = activeBlueprint
+      ? new Set(activeBlueprint.items.map((it) => String(it.questionId)))
+      : new Set(questions.map((q) => String(q.id)));
+
+    if (Object.keys(answers).some((id) => !questionIds.has(id))) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "Có đáp án cho câu hỏi không thuộc đề thi.",
+      });
+    }
+
     const serverStarted = activeAttempt.started_at ? new Date(activeAttempt.started_at) : null;
     const elapsedSeconds = Math.max(0, Number(activeAttempt.elapsed_seconds) || 0);
 
@@ -407,6 +451,8 @@ export async function submitExam(req, res, next) {
       );
       effectiveAllowedSec = Math.min(maxDurationSec, closeLimitSec);
     }
+
+    const serializedBlueprint = activeBlueprint ? JSON.stringify(activeBlueprint) : null;
 
     if (
       req.user.role === "STUDENT" &&
@@ -420,7 +466,9 @@ export async function submitExam(req, res, next) {
         correctCount: draftCorrect,
         totalQuestions: draftTotal,
         score: draftScore,
-      } = gradeAnswersAgainstQuestions(questions, savedDraftAnswers);
+      } = activeBlueprint
+        ? gradeAnswersWithBlueprint(activeBlueprint, questionsById, savedDraftAnswers)
+        : gradeAnswersAgainstQuestions(questions, savedDraftAnswers);
 
       const expiredTabCount = isAntiCheatExam
         ? Math.max(0, Number(activeAttempt.tab_switch_count) || 0)
@@ -432,8 +480,8 @@ export async function submitExam(req, res, next) {
 
       const [expiredInsert] = await connection.query(
         `INSERT INTO submissions
-          (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, answers_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, answers_json, attempt_blueprint_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           Number(examId),
           req.user.id,
@@ -445,13 +493,15 @@ export async function submitExam(req, res, next) {
           expiredTabCount,
           expiredUnfocused,
           JSON.stringify(savedDraftAnswers),
+          serializedBlueprint,
         ]
       );
       await connection.query(
-        "UPDATE exam_attempts SET status = 'COMPLETED' WHERE exam_id = ? AND user_id = ?",
+        "UPDATE exam_attempts SET status = 'COMPLETED', is_unfocused = 0 WHERE exam_id = ? AND user_id = ?",
         [Number(examId), req.user.id]
       );
       await connection.commit();
+      emitProctorStudentState(examId, req.user.id);
       return res.status(400).json({
         success: false,
         isExpired: true,
@@ -501,14 +551,28 @@ export async function submitExam(req, res, next) {
       ? incomingCleanAnswers
       : savedDraftAnswers;
 
-    const { correctCount, totalQuestions, score } = gradeAnswersAgainstQuestions(
-      questions,
-      finalAnswersToGrade
-    );
+    const { correctCount, totalQuestions, score } = activeBlueprint
+      ? gradeAnswersWithBlueprint(activeBlueprint, questionsById, finalAnswersToGrade)
+      : gradeAnswersAgainstQuestions(questions, finalAnswersToGrade);
 
-    const finalTabSwitchCount = isAntiCheatExam
-      ? Math.max(safeTabSwitchCount, Number(activeAttempt.tab_switch_count) || 0)
-      : 0;
+    const [vLogCheck] = await connection.query(
+      `SELECT
+         COUNT(*) AS total_logs,
+         SUM(CASE WHEN status IN ('PENDING', 'CONFIRMED') THEN 1 ELSE 0 END) AS valid_logs
+       FROM exam_violation_logs
+       WHERE exam_id = ?
+         AND user_id = ?
+         AND (? IS NULL OR created_at >= DATE_SUB(?, INTERVAL 2 SECOND))`,
+      [Number(examId), req.user.id, serverStarted, serverStarted]
+    );
+    const totalRecordedLogs = Number(vLogCheck[0]?.total_logs) || 0;
+    const validRecordedLogs = Number(vLogCheck[0]?.valid_logs) || 0;
+
+    const finalTabSwitchCount = !isAntiCheatExam
+      ? 0
+      : totalRecordedLogs > 0
+      ? validRecordedLogs
+      : Math.max(safeTabSwitchCount, Number(activeAttempt.tab_switch_count) || 0);
     const finalUnfocusedSeconds = Math.min(
       maxDurationSec,
       Math.max(safeUnfocusedSeconds, Number(activeAttempt.unfocused_seconds) || 0)
@@ -517,8 +581,8 @@ export async function submitExam(req, res, next) {
 
     const [result] = await connection.query(
       `INSERT INTO submissions
-        (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, answers_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, answers_json, attempt_blueprint_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         Number(examId),
         req.user.id,
@@ -530,12 +594,14 @@ export async function submitExam(req, res, next) {
         finalTabSwitchCount,
         finalUnfocusedSeconds,
         serializedAnswers,
+        serializedBlueprint,
       ]
     );
 
     await connection.query(
       `UPDATE exam_attempts
        SET status = 'COMPLETED',
+           is_unfocused = 0,
            tab_switch_count = ?,
            unfocused_seconds = ?,
            draft_answers_json = ?
@@ -550,6 +616,7 @@ export async function submitExam(req, res, next) {
     );
 
     await connection.commit();
+    emitProctorStudentState(examId, req.user.id);
 
     return res.status(201).json({
       success: true,
@@ -683,7 +750,7 @@ export async function getSubmissionDetail(req, res, next) {
       Number(submission.is_suspended) === 1 || Boolean(submission.suspend_reason);
     const passed =
       !isSuspended && Number(submission.score) >= Number(submission.pass_score ?? 5);
-    const { answers_json, ...summarySubmission } = submission;
+    const { answers_json, attempt_blueprint_json, ...summarySubmission } = submission;
 
     if (isStudent && !canViewAnswers && isAntiCheatExam) {
       return res.status(200).json({
@@ -697,37 +764,72 @@ export async function getSubmissionDetail(req, res, next) {
           exam_closed: false,
           hideDetails: true,
           can_view_answers: false,
+          options_pre_shuffled: false,
           questions: [],
         },
       });
     }
 
-    const [questions] = await pool.query(
-      `
-      SELECT
-        q.id,
-        q.content,
-        q.option_a,
-        q.option_b,
-        q.option_c,
-        q.option_d,
-        q.correct_answer,
-        q.difficulty,
-        q.explanation,
-        eq.order_index
-      FROM exam_questions eq
-      INNER JOIN questions q ON eq.question_id = q.id
-      WHERE eq.exam_id = ?
-      ORDER BY eq.order_index ASC, q.id ASC
-      `,
-      [submission.exam_id]
-    );
-
     const parsedAnswers = sanitizeAnswersObject(answers_json);
+    const storedBlueprint = parseAttemptBlueprint(attempt_blueprint_json);
+    let detailedQuestions = [];
+    let optionsPreShuffled = false;
 
-    const detailedQuestions = questions.map((q) => {
-      const selectedOption = parsedAnswers[q.id] || parsedAnswers[String(q.id)] || null;
-      if (!canViewAnswers) {
+    if (storedBlueprint) {
+      const bpQuestionIds = storedBlueprint.items.map((it) => it.questionId);
+      const [bpQuestions] =
+        bpQuestionIds.length > 0
+          ? await pool.query(
+              `SELECT id, subject_id, content, option_a, option_b, option_c, option_d, correct_answer, difficulty, explanation
+               FROM questions
+               WHERE id IN (?)`,
+              [bpQuestionIds]
+            )
+          : [[]];
+      const bpMap = new Map(bpQuestions.map((q) => [Number(q.id), q]));
+      detailedQuestions = formatQuestionsWithBlueprint(storedBlueprint, bpMap, {
+        includeAnswers: canViewAnswers,
+        parsedAnswers,
+      });
+      optionsPreShuffled = true;
+    } else {
+      const [questions] = await pool.query(
+        `
+        SELECT
+          q.id,
+          q.content,
+          q.option_a,
+          q.option_b,
+          q.option_c,
+          q.option_d,
+          q.correct_answer,
+          q.difficulty,
+          q.explanation,
+          eq.order_index
+        FROM exam_questions eq
+        INNER JOIN questions q ON eq.question_id = q.id
+        WHERE eq.exam_id = ?
+        ORDER BY eq.order_index ASC, q.id ASC
+        `,
+        [submission.exam_id]
+      );
+
+      detailedQuestions = questions.map((q) => {
+        const selectedOption = parsedAnswers[q.id] || parsedAnswers[String(q.id)] || null;
+        if (!canViewAnswers) {
+          return {
+            id: q.id,
+            content: q.content,
+            option_a: q.option_a,
+            option_b: q.option_b,
+            option_c: q.option_c,
+            option_d: q.option_d,
+            difficulty: q.difficulty,
+            order_index: q.order_index,
+            selected_option: selectedOption,
+          };
+        }
+        const isCorrect = selectedOption === q.correct_answer;
         return {
           id: q.id,
           content: q.content,
@@ -735,27 +837,15 @@ export async function getSubmissionDetail(req, res, next) {
           option_b: q.option_b,
           option_c: q.option_c,
           option_d: q.option_d,
+          correct_answer: q.correct_answer,
           difficulty: q.difficulty,
+          explanation: q.explanation,
           order_index: q.order_index,
           selected_option: selectedOption,
+          is_correct: isCorrect,
         };
-      }
-      const isCorrect = selectedOption === q.correct_answer;
-      return {
-        id: q.id,
-        content: q.content,
-        option_a: q.option_a,
-        option_b: q.option_b,
-        option_c: q.option_c,
-        option_d: q.option_d,
-        correct_answer: q.correct_answer,
-        difficulty: q.difficulty,
-        explanation: q.explanation,
-        order_index: q.order_index,
-        selected_option: selectedOption,
-        is_correct: isCorrect,
-      };
-    });
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -768,6 +858,7 @@ export async function getSubmissionDetail(req, res, next) {
         exam_closed: examClosed,
         hideDetails: false,
         can_view_answers: canViewAnswers,
+        options_pre_shuffled: optionsPreShuffled,
         questions: detailedQuestions,
       },
     });
@@ -783,6 +874,10 @@ export async function getAllSubmissions(req, res, next) {
       SELECT
         sub.*,
         e.title AS exam_title,
+        e.subject_id,
+        e.duration_minutes,
+        e.max_tab_switches,
+        e.anti_cheat,
         e.pass_score,
         s.name AS subject_name,
         s.code AS subject_code,
@@ -805,9 +900,73 @@ export async function getAllSubmissions(req, res, next) {
     sql += " ORDER BY sub.submitted_at DESC";
 
     const [rows] = await pool.query(sql, params);
+    if (rows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        meta: {
+          suspiciousPairs: [],
+          anomalySummary: {
+            totalAnomalousCount: 0,
+            fastCount: 0,
+            highViolationOrUnfocusCount: 0,
+            collusionStudentCount: 0,
+            suspiciousPairCount: 0,
+          },
+        },
+      });
+    }
+
+    const examIds = Array.from(new Set(rows.map((r) => Number(r.exam_id))));
+    const subjectIds = Array.from(new Set(rows.map((r) => Number(r.subject_id))));
+    const examsById = new Map();
+    for (const r of rows) {
+      if (!examsById.has(Number(r.exam_id))) {
+        examsById.set(Number(r.exam_id), {
+          id: Number(r.exam_id),
+          title: r.exam_title,
+          duration_minutes: r.duration_minutes,
+          max_tab_switches: r.max_tab_switches,
+          anti_cheat: r.anti_cheat,
+        });
+      }
+    }
+
+    const [[qRows], [eqRows]] = await Promise.all([
+      pool.query("SELECT id, correct_answer FROM questions WHERE subject_id IN (?)", [
+        subjectIds,
+      ]),
+      pool.query(
+        "SELECT exam_id, question_id FROM exam_questions WHERE exam_id IN (?)",
+        [examIds]
+      ),
+    ]);
+
+    const questionsById = new Map(qRows.map((q) => [Number(q.id), q]));
+    const linkedMap = new Map();
+    for (const eq of eqRows) {
+      const exId = Number(eq.exam_id);
+      if (!linkedMap.has(exId)) linkedMap.set(exId, []);
+      linkedMap.get(exId).push(Number(eq.question_id));
+    }
+
+    const {
+      enrichedSubmissions,
+      suspiciousPairs,
+      anomalySummary,
+    } = analyzeSubmissionsAnomalies(rows, examsById, questionsById, linkedMap);
+
+    const sanitizedRows = enrichedSubmissions.map(
+      ({ attempt_blueprint_json, ...rest }) => rest
+    );
+
     return res.status(200).json({
       success: true,
-      data: rows,
+      data: sanitizedRows,
+      meta: {
+        suspiciousPairs,
+        anomalySummary,
+      },
     });
   } catch (error) {
     next(error);
@@ -852,6 +1011,7 @@ export async function deleteSubmission(req, res, next) {
              tab_switch_count = 0,
              unfocused_seconds = 0,
              draft_answers_json = NULL,
+             attempt_blueprint_json = NULL,
              last_violation_at = NULL,
              last_violation_reason = NULL
          WHERE exam_id = ? AND user_id = ?`,
@@ -925,7 +1085,7 @@ export async function suspendSubmission(req, res, next) {
     const student = userRows[0];
 
     const [attemptRows] = await connection.query(
-      "SELECT started_at, status, tab_switch_count, unfocused_seconds, draft_answers_json FROM exam_attempts WHERE exam_id = ? AND user_id = ? FOR UPDATE",
+      "SELECT started_at, status, tab_switch_count, unfocused_seconds, draft_answers_json, attempt_blueprint_json FROM exam_attempts WHERE exam_id = ? AND user_id = ? FOR UPDATE",
       [Number(examId), Number(userId)]
     );
     const wasInProgress =
@@ -944,13 +1104,17 @@ export async function suspendSubmission(req, res, next) {
     const attemptDraftAnswers = sanitizeAnswersObject(
       attemptRows[0]?.draft_answers_json
     );
+    const attemptBlueprintObj = parseAttemptBlueprint(
+      attemptRows[0]?.attempt_blueprint_json
+    );
 
     await connection.query(
-      `INSERT INTO exam_attempts (exam_id, user_id, started_at, status, is_suspended, suspend_reason)
-       VALUES (?, ?, ?, 'COMPLETED', 1, ?)
+      `INSERT INTO exam_attempts (exam_id, user_id, started_at, status, is_suspended, suspend_reason, is_unfocused)
+       VALUES (?, ?, ?, 'COMPLETED', 1, ?, 0)
        ON DUPLICATE KEY UPDATE
          status = 'COMPLETED',
          is_suspended = 1,
+         is_unfocused = 0,
          suspend_reason = VALUES(suspend_reason)`,
       [Number(examId), Number(userId), attemptStartedAt, cleanReason]
     );
@@ -985,18 +1149,21 @@ export async function suspendSubmission(req, res, next) {
         : 0;
       await connection.query(
         `INSERT INTO submissions
-          (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, is_suspended, suspend_reason, answers_json)
-         VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, 1, ?, ?)`,
+          (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, is_suspended, suspend_reason, answers_json, attempt_blueprint_json)
+         VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
         [
           Number(examId),
           Number(userId),
-          Number(exam.total_questions) || 0,
+          attemptBlueprintObj
+            ? attemptBlueprintObj.items.length
+            : Number(exam.total_questions) || 0,
           timeSpentSec,
           attemptStartedAt,
           attemptTabSwitches,
           Math.min(maxDurationSec, attemptUnfocused),
           cleanReason,
           JSON.stringify(attemptDraftAnswers),
+          attemptBlueprintObj ? JSON.stringify(attemptBlueprintObj) : null,
         ]
       );
     }
@@ -1014,6 +1181,8 @@ export async function suspendSubmission(req, res, next) {
     );
 
     await connection.commit();
+    emitProctorStudentState(examId, userId);
+    emitStudentSuspended({ examId, userId, reason: cleanReason });
     return res.status(200).json({
       success: true,
       message: `Đã đình chỉ bài thi (0 điểm) của sinh viên ${student.full_name}!`,
@@ -1078,12 +1247,19 @@ export async function unsuspendSubmission(req, res, next) {
     }
 
     await connection.query(
+      "DELETE FROM exam_violation_logs WHERE exam_id = ? AND user_id = ?",
+      [Number(examId), Number(userId)]
+    );
+
+    await connection.query(
       `UPDATE exam_attempts
        SET is_suspended = 0,
            suspend_reason = NULL,
            tab_switch_count = 0,
            unfocused_seconds = 0,
+           is_unfocused = 0,
            draft_answers_json = NULL,
+           attempt_blueprint_json = NULL,
            last_violation_at = NULL,
            last_violation_reason = NULL,
            status = 'COMPLETED'
@@ -1106,6 +1282,7 @@ export async function unsuspendSubmission(req, res, next) {
     }
 
     await connection.commit();
+    emitProctorStudentState(examId, userId);
     return res.status(200).json({
       success: true,
       message: "Đã mở lại lượt thi cho sinh viên thành công!",
@@ -1119,7 +1296,6 @@ export async function unsuspendSubmission(req, res, next) {
 }
 
 export async function recordExamViolation(req, res, next) {
-  let connection;
   try {
     const examId = Number(req.params.id);
     if (!isId(examId)) {
@@ -1129,168 +1305,105 @@ export async function recordExamViolation(req, res, next) {
       });
     }
 
-    const reason = String(req.body?.reason || "Rời tab / Vi phạm quy chế")
-      .trim()
-      .slice(0, 255);
+    const result = await recordViolationWithLog({
+      examId,
+      userId: req.user.id,
+      reason: req.body?.reason,
+      unfocusedSeconds:
+        req.body?.unfocused_seconds ?? req.body?.unfocusedSeconds ?? 0,
+      answers: req.body?.answers ?? null,
+      clientEventId: req.body?.clientEventId ?? null,
+    });
 
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
-
-    const [exams] = await connection.query(
-      `SELECT id, duration_minutes, max_tab_switches, anti_cheat,
-              (SELECT COUNT(*) FROM exam_questions eq WHERE eq.exam_id = exams.id) AS total_questions
-       FROM exams WHERE id = ?`,
-      [examId]
-    );
-    if (!exams.length) {
-      await connection.rollback();
+    if (result.notFound) {
       return res.status(404).json({
         success: false,
         message: "Không tìm thấy đề thi.",
       });
     }
 
-    const isAntiCheatEnabled = Boolean(Number(exams[0].anti_cheat));
-    if (!isAntiCheatEnabled) {
-      await connection.rollback();
-      return res.status(200).json({
-        success: true,
-        data: {
-          antiCheatEnabled: false,
-          isSuspended: false,
-          tabSwitchCount: 0,
-          maxTabSwitches: null,
-          forceSubmit: false,
-        },
-      });
+    if (result.violationLog) {
+      emitProctorViolationNew(examId, result.violationLog, result.studentRow);
+    } else if (result.studentRow) {
+      emitProctorStudentState(examId, req.user.id, result.studentRow);
     }
 
-    const rawMaxAllowed = Number(exams[0].max_tab_switches);
-    const maxAllowed =
-      Number.isInteger(rawMaxAllowed) && rawMaxAllowed >= 1 ? rawMaxAllowed : 3;
-    const hasTabLimit = true;
-
-    const [existingAttempt] = await connection.query(
-      `SELECT
-         started_at,
-         TIMESTAMPDIFF(SECOND, started_at, NOW()) AS elapsed_seconds,
-         status,
-         is_suspended,
-         suspend_reason,
-         tab_switch_count,
-         unfocused_seconds,
-         draft_answers_json
-       FROM exam_attempts
-       WHERE exam_id = ? AND user_id = ?
-       FOR UPDATE`,
-      [examId, req.user.id]
-    );
-
-    if (existingAttempt.length > 0 && Number(existingAttempt[0].is_suspended) === 1) {
-      await connection.commit();
-      return res.status(200).json({
-        success: true,
-        data: {
-          isSuspended: true,
-          suspendReason: existingAttempt[0].suspend_reason || "Vi phạm quy chế phòng thi",
-          tabSwitchCount: Math.max(0, Number(existingAttempt[0].tab_switch_count) || 0),
-          maxTabSwitches: maxAllowed,
-          forceSubmit: true,
-        },
-      });
-    }
-
-    if (existingAttempt.length > 0 && existingAttempt[0].status === "COMPLETED") {
-      const [lastSub] = await connection.query(
-        "SELECT id FROM submissions WHERE exam_id = ? AND student_id = ? ORDER BY id DESC LIMIT 1",
-        [examId, req.user.id]
-      );
-      await connection.commit();
-      return res.status(200).json({
-        success: true,
-        data: {
-          isSuspended: false,
-          tabSwitchCount: Math.max(0, Number(existingAttempt[0].tab_switch_count) || 0),
-          maxTabSwitches: maxAllowed,
-          forceSubmit: true,
-          submissionId: lastSub[0]?.id || null,
-        },
-      });
-    }
-
-    const maxDurationSec = (Number(exams[0].duration_minutes) || 30) * 60;
-    const rawUnfocused =
-      req.body?.unfocused_seconds ?? req.body?.unfocusedSeconds ?? 0;
-    const safeUnfocused =
-      isNumber(rawUnfocused) && Number(rawUnfocused) >= 0
-        ? Math.min(maxDurationSec, Math.floor(Number(rawUnfocused)))
-        : 0;
-
-    let mergedDraftJson = existingAttempt[0]?.draft_answers_json ?? null;
-    const elapsedSec = Math.max(0, Number(existingAttempt[0]?.elapsed_seconds) || 0);
-    if (
-      req.body?.answers &&
-      typeof req.body.answers === "object" &&
-      !Array.isArray(req.body.answers) &&
-      elapsedSec <= maxDurationSec + NETWORK_GRACE_SECONDS
-    ) {
-      const [qRows] = await connection.query(
-        "SELECT question_id FROM exam_questions WHERE exam_id = ?",
-        [examId]
-      );
-      const validIds = new Set(qRows.map((r) => String(r.question_id)));
-      const prevDraft = sanitizeAnswersObject(mergedDraftJson, validIds);
-      const nextDraft = sanitizeAnswersObject(req.body.answers, validIds);
-      const combined =
-        Object.keys(nextDraft).length > 0 ? nextDraft : prevDraft;
-      mergedDraftJson = JSON.stringify(combined);
-    } else if (mergedDraftJson && typeof mergedDraftJson === "object") {
-      mergedDraftJson = JSON.stringify(mergedDraftJson);
-    }
-
-    await connection.query(
-      `INSERT INTO exam_attempts
-        (exam_id, user_id, started_at, status, tab_switch_count, unfocused_seconds, draft_answers_json, last_violation_at, last_violation_reason)
-       VALUES (?, ?, NOW(), 'IN_PROGRESS', 1, ?, ?, NOW(), ?)
-       ON DUPLICATE KEY UPDATE
-         tab_switch_count = tab_switch_count + 1,
-         unfocused_seconds = GREATEST(unfocused_seconds, VALUES(unfocused_seconds)),
-         draft_answers_json = COALESCE(VALUES(draft_answers_json), draft_answers_json),
-         last_violation_at = NOW(),
-         last_violation_reason = VALUES(last_violation_reason)`,
-      [examId, req.user.id, safeUnfocused, mergedDraftJson, reason]
-    );
-
-    const [attemptRows] = await connection.query(
-      `SELECT tab_switch_count
-       FROM exam_attempts
-       WHERE exam_id = ? AND user_id = ?
-       FOR UPDATE`,
-      [examId, req.user.id]
-    );
-
-    const tabSwitchCount = Math.max(
-      0,
-      Number(attemptRows[0]?.tab_switch_count) || 0
-    );
-    const forceSubmit = hasTabLimit && tabSwitchCount > maxAllowed;
-
-    await connection.commit();
     return res.status(200).json({
       success: true,
       data: {
-        isSuspended: false,
-        tabSwitchCount,
-        maxTabSwitches: maxAllowed,
-        forceSubmit,
-        submissionId: null,
+        antiCheatEnabled: result.antiCheatEnabled,
+        isSuspended: result.isSuspended,
+        suspendReason: result.suspendReason || undefined,
+        tabSwitchCount: result.tabSwitchCount,
+        maxTabSwitches: result.maxTabSwitches,
+        forceSubmit: result.forceSubmit,
+        submissionId: result.submissionId ?? null,
       },
     });
   } catch (error) {
-    if (connection) await connection.rollback();
     next(error);
-  } finally {
-    if (connection) connection.release();
+  }
+}
+
+export async function getLiveExamProctoring(req, res, next) {
+  try {
+    const examId = Number(req.params.id);
+    if (!isId(examId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Mã đề thi không hợp lệ.",
+      });
+    }
+    const data = await getExamLiveProctoringData(examId);
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy đề thi.",
+      });
+    }
+    return res.status(200).json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function reviewExamViolation(req, res, next) {
+  try {
+    const examId = Number(req.params.id);
+    const violationId = Number(req.params.violationId);
+    const decision = req.body?.decision;
+
+    const result = await reviewViolationLog({
+      examId,
+      violationId,
+      decision,
+      reviewer: req.user,
+    });
+
+    emitViolationReviewed({
+      examId,
+      userId: result.violationLog.user_id,
+      violationLog: result.violationLog,
+      studentRow: result.studentRow,
+      validViolationCount: result.validViolationCount,
+      maxTabSwitches: result.maxTabSwitches,
+      forceSubmit: result.forceSubmit,
+      decision: result.decision,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message:
+        result.decision === "DISMISSED"
+          ? "Đã bỏ qua lỗi vi phạm và cập nhật lại số lỗi hợp lệ cho thí sinh."
+          : "Đã xác nhận vi phạm và đồng bộ trạng thái cho thí sinh.",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
   }
 }
 

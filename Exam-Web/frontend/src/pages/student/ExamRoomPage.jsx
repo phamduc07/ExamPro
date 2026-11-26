@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
+import { createRealtimeSocket } from "../../api/socketClient";
 import { useExamStore } from "../../store/useExamStore";
 import { useAuth } from "../../context/AuthContext";
 import { useDialog, ZaloAppealBox } from "../../context/DialogContext";
@@ -95,6 +96,7 @@ export default function ExamRoomPage() {
   const ignoreBlurUntilRef = useRef(0);
   const latestAnswersRef = useRef({});
   const handleFinalSubmitRef = useRef(null);
+  const socketRef = useRef(null);
 
   useEffect(() => {
     const clean = extractValidAnswers(answers);
@@ -320,6 +322,7 @@ export default function ExamRoomPage() {
           unfocused_seconds: totalUnfocusedSeconds,
         });
         const submissionId = res.data.data.submissionId;
+        socketRef.current?.emit("student:submitted", { examId: Number(id) });
         const finalTabCount = currentState.tabSwitchCount || 0;
         const maxSwitches =
           Number(currentState.activeExam?.max_tab_switches) >= 1
@@ -486,6 +489,113 @@ export default function ExamRoomPage() {
   }, [id, loading, checklistVerified, activeExam, violationModal, lockRoomWithModal]);
 
   useEffect(() => {
+    if (loading || !checklistVerified || !activeExam || violationModal) return;
+    const examNumericId = Number(id);
+    const socket = createRealtimeSocket();
+    socketRef.current = socket;
+
+    const emitEnter = () => {
+      if (submitLockRef.current) return;
+      const focusedNow = !document.hidden && document.hasFocus();
+      const unfocusedSec = flushUnfocusSeconds();
+      socket.emit(
+        "student:exam_enter",
+        {
+          examId: examNumericId,
+          isFocused: focusedNow,
+          unfocusedSeconds: unfocusedSec,
+        },
+        (ack) => {
+          if (!ack?.success || !ack.data || submitLockRef.current) return;
+          if (ack.data.isSuspended) {
+            latestAnswersRef.current = {};
+            lockRoomWithModal({
+              title: "🚫 Bài thi đã bị Giám thị đình chỉ (0 điểm)",
+              reason:
+                ack.data.suspendReason ||
+                "Bài thi của bạn đã bị Giám thị đình chỉ do vi phạm quy chế phòng thi.",
+              nextPath: "/my-results",
+              actionLabel: "Về trang Lịch sử làm bài",
+            });
+            return;
+          }
+          if (
+            Boolean(Number(activeExam?.anti_cheat)) &&
+            typeof ack.data.tabSwitchCount === "number"
+          ) {
+            setTabSwitchCount(ack.data.tabSwitchCount);
+          }
+        }
+      );
+    };
+
+    socket.on("connect", emitEnter);
+    if (socket.connected) {
+      emitEnter();
+    }
+
+    socket.on("student:violation_reviewed", (payload) => {
+      if (submitLockRef.current || Number(payload?.examId) !== examNumericId) {
+        return;
+      }
+      if (typeof payload.validViolationCount === "number") {
+        setTabSwitchCount(payload.validViolationCount);
+      }
+      if (payload.decision === "DISMISSED") {
+        showToast(
+          payload.message || "✅ Giám thị đã bỏ qua 1 lỗi vi phạm cho bạn.",
+          "success"
+        );
+        setAntiCheatWarning(
+          payload.validViolationCount === 0
+            ? ""
+            : `ℹ️ Giám thị vừa bỏ qua lỗi oan cho bạn. Số lần vi phạm hợp lệ: ${payload.validViolationCount}/${payload.maxTabSwitches}`
+        );
+      } else if (payload.decision === "CONFIRMED") {
+        showToast(
+          payload.message || "⚠️ Giám thị đã xác nhận lỗi vi phạm.",
+          "warning"
+        );
+        if (payload.forceSubmit && handleFinalSubmitRef.current) {
+          handleFinalSubmitRef.current(true, "tabLimit");
+        }
+      }
+    });
+
+    socket.on("student:suspended", (payload) => {
+      if (submitLockRef.current || Number(payload?.examId) !== examNumericId) {
+        return;
+      }
+      latestAnswersRef.current = {};
+      lockRoomWithModal({
+        title: "🚫 Bài thi đã bị Giám thị đình chỉ (0 điểm)",
+        reason:
+          payload.suspendReason ||
+          "Bài thi của bạn đã bị Giám thị đình chỉ do vi phạm quy chế phòng thi.",
+        nextPath: "/my-results",
+        actionLabel: "Về trang Lịch sử làm bài",
+      });
+    });
+
+    return () => {
+      socket.disconnect();
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+    };
+  }, [
+    id,
+    loading,
+    checklistVerified,
+    activeExam,
+    violationModal,
+    flushUnfocusSeconds,
+    setTabSwitchCount,
+    showToast,
+    lockRoomWithModal,
+  ]);
+
+  useEffect(() => {
     return () => {
       clearBlurGraceTimer();
       if (autoSubmitTimerRef.current) {
@@ -499,26 +609,82 @@ export default function ExamRoomPage() {
     };
   }, [clearBlurGraceTimer]);
 
+  const applyServerViolationResponse = useCallback(
+    (data) => {
+      if (!data || submitLockRef.current) return;
+      if (typeof data.tabSwitchCount === "number") {
+        setTabSwitchCount(data.tabSwitchCount);
+      }
+      if (data.isSuspended) {
+        latestAnswersRef.current = {};
+        lockRoomWithModal({
+          title: "🚫 Bài thi đã bị Giám thị đình chỉ (0 điểm)",
+          reason:
+            data.suspendReason ||
+            "Bài thi của bạn đã bị Giám thị đình chỉ do vi phạm quy chế phòng thi.",
+          nextPath: "/my-results",
+          actionLabel: "Về trang Lịch sử làm bài",
+        });
+        return;
+      }
+      if (data.forceSubmit) {
+        if (data.submissionId) {
+          latestAnswersRef.current = {};
+          resetExamSession();
+          lockRoomWithModal({
+            title: "🚫 Bài thi đã tự động thu do vượt quá số lần vi phạm",
+            reason: `Bạn đã vượt quá giới hạn vi phạm cho phép (${data.tabSwitchCount}/${data.maxTabSwitches} lần). Hệ thống đã tự động thu bài của bạn.`,
+            nextPath: `/results/${data.submissionId}`,
+            actionLabel: "Xem kết quả bài thi",
+          });
+        } else if (handleFinalSubmitRef.current) {
+          handleFinalSubmitRef.current(true, "tabLimit");
+        }
+      }
+    },
+    [setTabSwitchCount, lockRoomWithModal, resetExamSession]
+  );
+
   const reportViolationToServer = useCallback(
     async (reason) => {
       if (submitLockRef.current || !Boolean(Number(activeExam?.anti_cheat))) return null;
       const baseUrl = String(
         axiosClient.defaults.baseURL || "http://localhost:5000/api"
       ).replace(/\/$/, "");
-      const token = localStorage.getItem("ptit_exam_token");
       const snapshotAnswers = getSnapshotAnswers();
       const unfocusedSec = flushUnfocusSeconds();
       const maxAllowedLocal =
         Number(activeExam?.max_tab_switches) >= 1
           ? Number(activeExam.max_tab_switches)
           : 3;
+      const clientEventId =
+        typeof globalThis.crypto?.randomUUID === "function"
+          ? globalThis.crypto.randomUUID()
+          : `vio_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+      if (socketRef.current?.connected) {
+        socketRef.current.emit(
+          "student:violation",
+          {
+            examId: Number(id),
+            reason,
+            unfocusedSeconds: unfocusedSec,
+            answers: snapshotAnswers,
+            clientEventId,
+          },
+          (ack) => {
+            if (ack?.success && ack.data) {
+              applyServerViolationResponse(ack.data);
+            }
+          }
+        );
+      }
 
       try {
         const response = await fetch(`${baseUrl}/exams/${id}/violation`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           credentials: "include",
           keepalive: true,
@@ -526,39 +692,25 @@ export default function ExamRoomPage() {
             reason,
             answers: snapshotAnswers,
             unfocused_seconds: unfocusedSec,
+            clientEventId,
           }),
         });
         const json = await response.json().catch(() => null);
-        if (json?.success && json.data) {
-          if (typeof json.data.tabSwitchCount === "number") {
-            setTabSwitchCount(json.data.tabSwitchCount);
-          }
-          if (json.data.isSuspended) {
-            latestAnswersRef.current = {};
-            lockRoomWithModal({
-              title: "🚫 Bài thi đã bị Giám thị đình chỉ (0 điểm)",
-              reason:
-                json.data.suspendReason ||
-                "Bài thi của bạn đã bị Giám thị đình chỉ do vi phạm quy chế phòng thi.",
-              nextPath: "/my-results",
-              actionLabel: "Về trang Lịch sử làm bài",
-            });
-            return json.data;
-          }
-          if (json.data.forceSubmit) {
-            if (json.data.submissionId) {
-              latestAnswersRef.current = {};
-              resetExamSession();
-              lockRoomWithModal({
-                title: "🚫 Bài thi đã tự động thu do vượt quá số lần vi phạm",
-                reason: `Bạn đã vượt quá giới hạn vi phạm cho phép (${json.data.tabSwitchCount}/${json.data.maxTabSwitches} lần). Hệ thống đã tự động thu bài của bạn.`,
-                nextPath: `/results/${json.data.submissionId}`,
-                actionLabel: "Xem kết quả bài thi",
-              });
-            } else if (handleFinalSubmitRef.current) {
-              handleFinalSubmitRef.current(true, "tabLimit");
+        if (response.status === 401) {
+          try {
+            if (json?.message) {
+              sessionStorage.setItem("ptit_auth_kick_notice", json.message);
             }
+          } catch {}
+          resetExamSession();
+          if (document.fullscreenElement && document.exitFullscreen) {
+            document.exitFullscreen().catch(() => {});
           }
+          window.location.replace("/login");
+          return null;
+        }
+        if (json?.success && json.data) {
+          applyServerViolationResponse(json.data);
           return json.data;
         }
       } catch {
@@ -583,9 +735,8 @@ export default function ExamRoomPage() {
       id,
       activeExam?.anti_cheat,
       activeExam?.max_tab_switches,
-      setTabSwitchCount,
       resetExamSession,
-      lockRoomWithModal,
+      applyServerViolationResponse,
       getSnapshotAnswers,
       flushUnfocusSeconds,
     ]
@@ -595,9 +746,19 @@ export default function ExamRoomPage() {
     if (loading || !checklistVerified || !activeExam || violationModal) return;
 
     const isAntiCheatExam = Boolean(Number(activeExam.anti_cheat));
+    const emitFocusTelemetry = (isFocused) => {
+      if (submitLockRef.current) return;
+      const unfocusedSec = flushUnfocusSeconds();
+      socketRef.current?.emit("student:focus_change", {
+        examId: Number(id),
+        isFocused,
+        unfocusedSeconds: unfocusedSec,
+      });
+    };
 
     if (document.hidden || !document.hasFocus()) {
       unfocusedSinceRef.current = Date.now();
+      emitFocusTelemetry(false);
     }
 
     const triggerViolationNow = (reasonText) => {
@@ -618,10 +779,11 @@ export default function ExamRoomPage() {
         }
         clearBlurGraceTimer();
         episodePenalizedRef.current = true;
+        emitFocusTelemetry(false);
         triggerViolationNow("Rời tab hoặc thu nhỏ trình duyệt");
       } else if (document.hasFocus()) {
-        flushUnfocusSeconds();
         episodePenalizedRef.current = false;
+        emitFocusTelemetry(true);
       }
     };
 
@@ -631,6 +793,7 @@ export default function ExamRoomPage() {
       if (unfocusedSinceRef.current === null) {
         unfocusedSinceRef.current = Date.now();
       }
+      emitFocusTelemetry(false);
       if (!isAntiCheatExam || document.hidden || episodePenalizedRef.current) {
         return;
       }
@@ -643,7 +806,7 @@ export default function ExamRoomPage() {
         if (submitLockRef.current || episodePenalizedRef.current) return;
         if (document.hidden || !document.hasFocus()) {
           episodePenalizedRef.current = true;
-          flushUnfocusSeconds();
+          emitFocusTelemetry(false);
           triggerViolationNow("Mất focus cửa sổ quá 3 giây (Chuyển sang cửa sổ khác)");
         }
       }, BLUR_GRACE_MS);
@@ -652,18 +815,26 @@ export default function ExamRoomPage() {
     const handleWindowFocus = () => {
       const returnedWithinGrace = blurGraceTimerRef.current !== null;
       clearBlurGraceTimer();
-      flushUnfocusSeconds();
       episodePenalizedRef.current = false;
+      emitFocusTelemetry(true);
       if (returnedWithinGrace && isAntiCheatExam && !submitLockRef.current) {
         setAntiCheatWarning("");
       }
     };
+
+    const unfocusPulseInterval = setInterval(() => {
+      if (submitLockRef.current) return;
+      if (unfocusedSinceRef.current !== null || document.hidden || !document.hasFocus()) {
+        emitFocusTelemetry(false);
+      }
+    }, 2000);
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("focus", handleWindowFocus);
 
     return () => {
+      clearInterval(unfocusPulseInterval);
       clearBlurGraceTimer();
       flushUnfocusSeconds();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -671,6 +842,7 @@ export default function ExamRoomPage() {
       window.removeEventListener("focus", handleWindowFocus);
     };
   }, [
+    id,
     loading,
     checklistVerified,
     activeExam,
@@ -824,12 +996,13 @@ export default function ExamRoomPage() {
     { key: "D", text: currentQuestion.option_d },
   ];
   const displayLabels = ["A", "B", "C", "D"];
-  const options = activeExam.shuffle_options
-    ? seededShuffle(
-        baseOptions,
-        `${activeExam.id}-${currentQuestion.id}-${startedAt || ""}`
-      )
-    : baseOptions;
+  const options =
+    !activeExam.options_pre_shuffled && activeExam.shuffle_options
+      ? seededShuffle(
+          baseOptions,
+          `${activeExam.id}-${currentQuestion.id}-${startedAt || ""}`
+        )
+      : baseOptions;
 
   return (
     <div

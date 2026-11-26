@@ -5,6 +5,11 @@ import { useDialog } from "../context/DialogContext";
 import { MAJOR_GROUP_LABELS } from "../utils/ptitHelper";
 import SuspendExamModal from "./exam/SuspendExamModal";
 import ReopenAttemptModal from "./exam/ReopenAttemptModal";
+import AnomalyInspectorBar, {
+  AnomalyBadges,
+  filterRowsByAnomaly,
+} from "./exam/AnomalyInspectorBar";
+import LiveProctoringSection from "./exam/LiveProctoringSection";
 
 function formatDuration(sec) {
   const safe = Math.max(0, Number(sec) || 0);
@@ -49,10 +54,24 @@ export default function AdminExamMonitor() {
   const [error, setError] = useState("");
 
   const [selectedExamId, setSelectedExamId] = useState(null);
+  const [liveFocusedExamId, setLiveFocusedExamId] = useState(null);
   const [modalTab, setModalTab] = useState("LEADERBOARD");
+  const [anomalyFilter, setAnomalyFilter] = useState("ALL");
   const [leaderboardData, setLeaderboardData] = useState(null);
   const [modalLoading, setModalLoading] = useState(false);
   const [modalError, setModalError] = useState("");
+
+  const refreshOpenModalSilently = useCallback(async (examId) => {
+    if (!examId) return;
+    try {
+      const res = await axiosClient.get(`/exams/${examId}/leaderboard`);
+      if (res.data?.data) {
+        setLeaderboardData(res.data.data);
+      }
+    } catch {
+      return;
+    }
+  }, []);
 
   const loadOverview = useCallback(async () => {
     setLoading(true);
@@ -78,6 +97,7 @@ export default function AdminExamMonitor() {
   const openLeaderboardModal = async (examId) => {
     setSelectedExamId(examId);
     setModalTab("LEADERBOARD");
+    setAnomalyFilter("ALL");
     setModalLoading(true);
     setModalError("");
     setLeaderboardData(null);
@@ -122,6 +142,7 @@ export default function AdminExamMonitor() {
       "Giờ nộp bài",
       "Số lần thoát tab",
       "Tổng TG mất focus (giây)",
+      "Cảnh báo bất thường",
     ];
     const rows = leaderboardData.leaderboard.map((row) => [
       row.rank,
@@ -137,6 +158,7 @@ export default function AdminExamMonitor() {
       row.submitted_at ? new Date(row.submitted_at).toLocaleString("vi-VN") : "",
       Number(row.tab_switch_count) || 0,
       Number(row.unfocused_seconds) || 0,
+      (row.anomaly_flags || []).join("; "),
     ]);
     const csvContent =
       "\uFEFF" +
@@ -358,6 +380,21 @@ export default function AdminExamMonitor() {
         </div>
       </section>
 
+      <LiveProctoringSection
+        openExams={onlineExams}
+        focusedExamId={liveFocusedExamId}
+        onSelectExamId={setLiveFocusedExamId}
+        onOpenSuspend={openSuspendModal}
+        onRealtimeChange={(payload) => {
+          if (
+            selectedExamId &&
+            Number(payload?.examId) === Number(selectedExamId)
+          ) {
+            refreshOpenModalSilently(selectedExamId);
+          }
+        }}
+      />
+
       <section className="panel-card">
         <div className="panel-header-flex">
           <div className="tab-switcher">
@@ -523,7 +560,21 @@ export default function AdminExamMonitor() {
                             )}
                           </div>
 
-                          <div className="exam-card-footer" style={{ display: "flex", gap: "8px" }}>
+                          <div className="exam-card-footer" style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                            {activeTab !== "CLOSED" &&
+                              onlineExams.some((oe) => Number(oe.id) === Number(exam.id)) && (
+                                <button
+                                  type="button"
+                                  className="btn-sm picker-bank-btn"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setLiveFocusedExamId(exam.id);
+                                    window.scrollTo({ top: 0, behavior: "smooth" });
+                                  }}
+                                >
+                                  📡 Giám sát trực tiếp
+                                </button>
+                              )}
                             <button
                               type="button"
                               className="btn-enter-exam"
@@ -667,83 +718,99 @@ export default function AdminExamMonitor() {
                       </button>
                     </div>
 
-                    <div className="bulk-preview-list" style={{ maxHeight: "52vh" }}>
+                    <div className="bulk-preview-list" style={{ maxHeight: "56vh" }}>
                       {modalTab === "LEADERBOARD" ? (
                         leaderboardData.leaderboard.length === 0 ? (
                           <div className="bulk-preview-empty">
                             Chưa có sinh viên nào nộp bài cho đề thi này.
                           </div>
                         ) : (
-                          <div className="table-responsive">
-                            <table className="data-table">
-                              <thead>
-                                <tr>
-                                  <th>Hạng</th>
-                                  <th>Mã SV</th>
-                                  <th>Họ tên</th>
-                                  <th>Khối ngành</th>
-                                  <th>Điểm số</th>
-                                  <th>Thời gian làm</th>
-                                  <th>Khung giờ nộp</th>
-                                  <th>Thoát tab</th>
-                                  <th>Mất focus</th>
-                                  <th style={{ textAlign: "right" }}>Thao tác</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {leaderboardData.leaderboard.map((row) => {
-                                  const score = Number(row.score);
-                                  const isSuspended = Number(row.is_suspended) === 1;
-                                  const tabCount = Number(row.tab_switch_count) || 0;
-                                  const unfocusedSec = Math.max(
-                                    0,
-                                    Number(row.unfocused_seconds) || 0
-                                  );
-                                  const tabClass =
-                                    tabCount === 0
-                                      ? "safe"
-                                      : tabCount <= 2
-                                      ? "warn"
-                                      : "danger";
-                                  const unfocusClass =
-                                    unfocusedSec === 0
-                                      ? "safe"
-                                      : unfocusedSec <= 15
-                                      ? "warn"
-                                      : "danger";
-                                  return (
-                                    <tr key={row.submission_id}>
-                                      <td>
-                                        <strong>{formatRankDisplay(row.rank)}</strong>
-                                        {row.is_tied && (
-                                          <div className="sub-text" style={{ color: "var(--amber-bright)" }}>
-                                            Đồng hạng
-                                          </div>
-                                        )}
-                                      </td>
-                                      <td>
-                                        <span className="code-badge">
-                                          {row.student_code || "SV"}
-                                        </span>
-                                      </td>
-                                      <td>
-                                        <strong>{row.full_name}</strong>
-                                        {isSuspended && (
-                                          <div style={{ marginTop: "4px" }}>
-                                            <span
-                                              className="tab-switch-badge danger"
-                                              title={row.suspend_reason || "Vi phạm quy chế"}
-                                            >
-                                              🛑 BỊ ĐÌNH CHỈ
-                                            </span>
-                                            {row.suspend_reason && (
-                                              <div className="sub-text" style={{ color: "var(--rose-bright)" }}>
-                                                {row.suspend_reason}
-                                              </div>
-                                            )}
-                                          </div>
-                                        )}
-                                      </td>
+                          <>
+                            <AnomalyInspectorBar
+                              summary={leaderboardData.anomalySummary}
+                              suspiciousPairs={leaderboardData.suspiciousPairs || []}
+                              activeFilter={anomalyFilter}
+                              onFilterChange={setAnomalyFilter}
+                              totalCount={leaderboardData.leaderboard.length}
+                              onCloseModal={closeLeaderboardModal}
+                            />
+                            <div className="table-responsive">
+                              <table className="data-table">
+                                <thead>
+                                  <tr>
+                                    <th>Hạng</th>
+                                    <th>Mã SV</th>
+                                    <th>Họ tên & Cảnh báo</th>
+                                    <th>Khối ngành</th>
+                                    <th>Điểm số</th>
+                                    <th>Thời gian làm</th>
+                                    <th>Khung giờ nộp</th>
+                                    <th>Thoát tab</th>
+                                    <th>Mất focus</th>
+                                    <th style={{ textAlign: "right" }}>Thao tác</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {filterRowsByAnomaly(
+                                    leaderboardData.leaderboard,
+                                    anomalyFilter
+                                  ).map((row) => {
+                                    const score = Number(row.score);
+                                    const isSuspended = Number(row.is_suspended) === 1;
+                                    const tabCount = Number(row.tab_switch_count) || 0;
+                                    const unfocusedSec = Math.max(
+                                      0,
+                                      Number(row.unfocused_seconds) || 0
+                                    );
+                                    const tabClass =
+                                      tabCount === 0
+                                        ? "safe"
+                                        : tabCount <= 2
+                                        ? "warn"
+                                        : "danger";
+                                    const unfocusClass =
+                                      unfocusedSec === 0
+                                        ? "safe"
+                                        : unfocusedSec <= 15
+                                        ? "warn"
+                                        : "danger";
+                                    return (
+                                      <tr
+                                        key={row.submission_id}
+                                        className={row.is_anomalous ? "anomalous-row" : ""}
+                                      >
+                                        <td>
+                                          <strong>{formatRankDisplay(row.rank)}</strong>
+                                          {row.is_tied && (
+                                            <div className="sub-text" style={{ color: "var(--amber-bright)" }}>
+                                              Đồng hạng
+                                            </div>
+                                          )}
+                                        </td>
+                                        <td>
+                                          <span className="code-badge">
+                                            {row.student_code || "SV"}
+                                          </span>
+                                        </td>
+                                        <td>
+                                          <strong>{row.full_name}</strong>
+                                          <AnomalyBadges row={row} />
+                                          {isSuspended && (
+                                            <div style={{ marginTop: "4px" }}>
+                                              <span
+                                                className="tab-switch-badge danger"
+                                                title={row.suspend_reason || "Vi phạm quy chế"}
+                                              >
+                                                🛑 BỊ ĐÌNH CHỈ
+                                              </span>
+                                              {row.suspend_reason && (
+                                                <div className="sub-text" style={{ color: "var(--rose-bright)" }}>
+                                                  {row.suspend_reason}
+                                                </div>
+                                              )}
+                                            </div>
+                                          )}
+                                        </td>
                                       <td>
                                         <span
                                           className={`major-group-badge ${
@@ -833,10 +900,11 @@ export default function AdminExamMonitor() {
                                       </td>
                                     </tr>
                                   );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </>
                         )
                       ) : leaderboardData.inProgress.length === 0 ? (
                         <div className="bulk-preview-empty">

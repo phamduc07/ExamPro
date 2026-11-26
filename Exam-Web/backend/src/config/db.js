@@ -45,6 +45,7 @@ export async function initializeDatabase() {
       pending_first_login TINYINT(1) NOT NULL DEFAULT 0,
       must_change_password TINYINT(1) NOT NULL DEFAULT 0,
       token_version INT NOT NULL DEFAULT 1,
+      active_session_id VARCHAR(64) DEFAULT NULL,
       failed_login_attempts INT NOT NULL DEFAULT 0,
       locked_until DATETIME DEFAULT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -97,8 +98,11 @@ export async function initializeDatabase() {
       major_group ENUM('ALL', 'KY_THUAT', 'KINH_TE') NOT NULL DEFAULT 'ALL',
       exam_session VARCHAR(150) DEFAULT NULL,
       exam_shift VARCHAR(100) DEFAULT NULL,
-      shuffle_questions TINYINT(1) NOT NULL DEFAULT 0,
-      shuffle_options TINYINT(1) NOT NULL DEFAULT 0,
+      shuffle_questions TINYINT(1) NOT NULL DEFAULT 1,
+      shuffle_options TINYINT(1) NOT NULL DEFAULT 1,
+      easy_count INT NOT NULL DEFAULT 0,
+      medium_count INT NOT NULL DEFAULT 0,
+      hard_count INT NOT NULL DEFAULT 0,
       anti_cheat TINYINT(1) NOT NULL DEFAULT 0,
       max_tab_switches INT DEFAULT NULL,
       max_attempts INT DEFAULT NULL,
@@ -143,6 +147,7 @@ export async function initializeDatabase() {
       is_suspended TINYINT(1) NOT NULL DEFAULT 0,
       suspend_reason VARCHAR(255) DEFAULT NULL,
       answers_json JSON NOT NULL,
+      attempt_blueprint_json JSON DEFAULT NULL,
       submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT fk_sub_exam FOREIGN KEY (exam_id)
         REFERENCES exams(id) ON DELETE CASCADE,
@@ -189,13 +194,37 @@ export async function initializeDatabase() {
       suspend_reason VARCHAR(255) DEFAULT NULL,
       tab_switch_count INT NOT NULL DEFAULT 0,
       unfocused_seconds INT NOT NULL DEFAULT 0,
+      is_unfocused TINYINT(1) NOT NULL DEFAULT 0,
       draft_answers_json JSON DEFAULT NULL,
+      attempt_blueprint_json JSON DEFAULT NULL,
       last_violation_at DATETIME DEFAULT NULL,
       last_violation_reason VARCHAR(255) DEFAULT NULL,
       UNIQUE KEY uq_exam_attempt (exam_id, user_id),
       CONSTRAINT fk_attempt_exam FOREIGN KEY (exam_id)
         REFERENCES exams(id) ON DELETE CASCADE,
       CONSTRAINT fk_attempt_user FOREIGN KEY (user_id)
+        REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS exam_violation_logs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      exam_id INT NOT NULL,
+      user_id INT NOT NULL,
+      client_event_id VARCHAR(64) DEFAULT NULL,
+      reason VARCHAR(255) NOT NULL,
+      unfocused_seconds_snapshot INT NOT NULL DEFAULT 0,
+      status ENUM('PENDING', 'CONFIRMED', 'DISMISSED') NOT NULL DEFAULT 'PENDING',
+      reviewed_by INT DEFAULT NULL,
+      reviewed_by_name VARCHAR(120) DEFAULT NULL,
+      reviewed_at DATETIME DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_violation_client_event (client_event_id),
+      KEY idx_violation_exam_user (exam_id, user_id),
+      CONSTRAINT fk_vlog_exam FOREIGN KEY (exam_id)
+        REFERENCES exams(id) ON DELETE CASCADE,
+      CONSTRAINT fk_vlog_user FOREIGN KEY (user_id)
         REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB;
   `);
@@ -632,8 +661,13 @@ async function ensureSchemaColumns() {
   await safeAlter(
     "ALTER TABLE users ADD COLUMN token_version INT NOT NULL DEFAULT 1 AFTER major_group"
   );
+  await ensureColumn(
+    "users",
+    "active_session_id",
+    "ALTER TABLE users ADD COLUMN active_session_id VARCHAR(64) DEFAULT NULL AFTER token_version"
+  );
   await safeAlter(
-    "ALTER TABLE users ADD COLUMN failed_login_attempts INT NOT NULL DEFAULT 0 AFTER token_version"
+    "ALTER TABLE users ADD COLUMN failed_login_attempts INT NOT NULL DEFAULT 0 AFTER active_session_id"
   );
   await safeAlter(
     "ALTER TABLE users ADD COLUMN locked_until DATETIME DEFAULT NULL AFTER failed_login_attempts"
@@ -654,8 +688,23 @@ async function ensureSchemaColumns() {
   await safeAlter(
     "ALTER TABLE exams ADD COLUMN shuffle_options TINYINT(1) NOT NULL DEFAULT 0 AFTER shuffle_questions"
   );
+  await ensureColumn(
+    "exams",
+    "easy_count",
+    "ALTER TABLE exams ADD COLUMN easy_count INT NOT NULL DEFAULT 0 AFTER shuffle_options"
+  );
+  await ensureColumn(
+    "exams",
+    "medium_count",
+    "ALTER TABLE exams ADD COLUMN medium_count INT NOT NULL DEFAULT 0 AFTER easy_count"
+  );
+  await ensureColumn(
+    "exams",
+    "hard_count",
+    "ALTER TABLE exams ADD COLUMN hard_count INT NOT NULL DEFAULT 0 AFTER medium_count"
+  );
   await safeAlter(
-    "ALTER TABLE exams ADD COLUMN anti_cheat TINYINT(1) NOT NULL DEFAULT 0 AFTER shuffle_options"
+    "ALTER TABLE exams ADD COLUMN anti_cheat TINYINT(1) NOT NULL DEFAULT 0 AFTER hard_count"
   );
   await safeAlter(
     "ALTER TABLE exams ADD COLUMN max_tab_switches INT DEFAULT NULL AFTER anti_cheat"
@@ -695,6 +744,11 @@ async function ensureSchemaColumns() {
   await safeAlter(
     "ALTER TABLE submissions ADD COLUMN suspend_reason VARCHAR(255) DEFAULT NULL AFTER is_suspended"
   );
+  await ensureColumn(
+    "submissions",
+    "attempt_blueprint_json",
+    "ALTER TABLE submissions ADD COLUMN attempt_blueprint_json JSON DEFAULT NULL AFTER answers_json"
+  );
   await safeAlter(
     "ALTER TABLE exam_attempts ADD COLUMN is_suspended TINYINT(1) NOT NULL DEFAULT 0 AFTER status"
   );
@@ -711,11 +765,21 @@ async function ensureSchemaColumns() {
   );
   await ensureColumn(
     "exam_attempts",
+    "is_unfocused",
+    "ALTER TABLE exam_attempts ADD COLUMN is_unfocused TINYINT(1) NOT NULL DEFAULT 0 AFTER unfocused_seconds"
+  );
+  await ensureColumn(
+    "exam_attempts",
     "draft_answers_json",
-    "ALTER TABLE exam_attempts ADD COLUMN draft_answers_json JSON DEFAULT NULL AFTER unfocused_seconds"
+    "ALTER TABLE exam_attempts ADD COLUMN draft_answers_json JSON DEFAULT NULL AFTER is_unfocused"
+  );
+  await ensureColumn(
+    "exam_attempts",
+    "attempt_blueprint_json",
+    "ALTER TABLE exam_attempts ADD COLUMN attempt_blueprint_json JSON DEFAULT NULL AFTER draft_answers_json"
   );
   await safeAlter(
-    "ALTER TABLE exam_attempts ADD COLUMN last_violation_at DATETIME DEFAULT NULL AFTER draft_answers_json"
+    "ALTER TABLE exam_attempts ADD COLUMN last_violation_at DATETIME DEFAULT NULL AFTER attempt_blueprint_json"
   );
   await safeAlter(
     "ALTER TABLE exam_attempts ADD COLUMN last_violation_reason VARCHAR(255) DEFAULT NULL AFTER last_violation_at"
@@ -755,6 +819,29 @@ async function ensureSchemaColumns() {
      INNER JOIN exams e ON sub.exam_id = e.id
      SET sub.tab_switch_count = 0
      WHERE e.anti_cheat = 0 AND sub.tab_switch_count > 0`
+  );
+  await pool.query(
+    `UPDATE exams e
+     SET
+       e.easy_count = (
+         SELECT COUNT(*)
+         FROM exam_questions eq
+         INNER JOIN questions q ON eq.question_id = q.id
+         WHERE eq.exam_id = e.id AND q.difficulty = 'EASY'
+       ),
+       e.medium_count = (
+         SELECT COUNT(*)
+         FROM exam_questions eq
+         INNER JOIN questions q ON eq.question_id = q.id
+         WHERE eq.exam_id = e.id AND (q.difficulty = 'MEDIUM' OR q.difficulty IS NULL)
+       ),
+       e.hard_count = (
+         SELECT COUNT(*)
+         FROM exam_questions eq
+         INNER JOIN questions q ON eq.question_id = q.id
+         WHERE eq.exam_id = e.id AND q.difficulty = 'HARD'
+       )
+     WHERE e.easy_count = 0 AND e.medium_count = 0 AND e.hard_count = 0`
   );
 }
 

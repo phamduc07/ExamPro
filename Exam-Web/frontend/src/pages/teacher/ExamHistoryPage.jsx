@@ -33,6 +33,8 @@ const ACTION_BADGE_MAP = {
   REVOKE_ADMIN: { label: "🔴 Thu hồi quyền Admin", cls: "danger" },
   SUSPEND_SUBMISSION: { label: "🛑 Đình chỉ bài thi (0đ)", cls: "danger" },
   UNSUSPEND_SUBMISSION: { label: "🔄 Mở lại lượt thi SV", cls: "info" },
+  DISMISS_VIOLATION: { label: "✅ Tha lỗi vi phạm SV", cls: "safe" },
+  CONFIRM_VIOLATION: { label: "⚠️ Xác nhận lỗi vi phạm", cls: "warn" },
 };
 
 export default function ExamHistoryPage() {

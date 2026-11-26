@@ -1,5 +1,14 @@
 import { pool } from "../config/db.js";
 import { validateExam } from "../utils/validation.js";
+import {
+  cryptoShuffle,
+  parseAttemptBlueprint,
+  generateAttemptBlueprint,
+  formatQuestionsWithBlueprint,
+  gradeAnswersWithBlueprint,
+  analyzeSubmissionsAnomalies,
+} from "../utils/examBlueprint.js";
+import { emitProctorStudentState } from "../socket/proctorSocket.js";
 
 async function logAdminAction(
   dbClient,
@@ -201,7 +210,8 @@ export async function getExamById(req, res, next) {
            suspend_reason,
            tab_switch_count,
            unfocused_seconds,
-           draft_answers_json
+           draft_answers_json,
+           attempt_blueprint_json
          FROM exam_attempts
          WHERE exam_id = ? AND user_id = ?
          LIMIT 1`,
@@ -250,28 +260,54 @@ export async function getExamById(req, res, next) {
           Number(existingAttempt[0].tab_switch_count) > Number(exam.max_tab_switches);
 
         if (exceededTime || exceededViolation) {
-          const [examQRows] = await pool.query(
-            `SELECT q.id, q.correct_answer
-             FROM exam_questions eq
-             INNER JOIN questions q ON eq.question_id = q.id
-             WHERE eq.exam_id = ?`,
-            [id]
-          );
-          const validIds = new Set(examQRows.map((q) => String(q.id)));
-          const savedAnswers = parseSafeDraftAnswers(
-            existingAttempt[0].draft_answers_json,
-            validIds
+          const prevBlueprint = parseAttemptBlueprint(
+            existingAttempt[0].attempt_blueprint_json
           );
           let correctCount = 0;
-          for (const q of examQRows) {
-            const choice = savedAnswers[String(q.id)];
-            if (choice && choice === q.correct_answer) {
-              correctCount++;
+          let totalQ = 0;
+          let autoScore = 0;
+          let savedAnswers = {};
+
+          if (prevBlueprint) {
+            const bpIds = prevBlueprint.items.map((it) => it.questionId);
+            const [bpQRows] = await pool.query(
+              "SELECT id, correct_answer FROM questions WHERE id IN (?)",
+              [bpIds]
+            );
+            const qMap = new Map(bpQRows.map((q) => [Number(q.id), q]));
+            const validIds = new Set(bpIds.map(String));
+            savedAnswers = parseSafeDraftAnswers(
+              existingAttempt[0].draft_answers_json,
+              validIds
+            );
+            const graded = gradeAnswersWithBlueprint(prevBlueprint, qMap, savedAnswers);
+            correctCount = graded.correctCount;
+            totalQ = graded.totalQuestions;
+            autoScore = graded.score;
+          } else {
+            const [examQRows] = await pool.query(
+              `SELECT q.id, q.correct_answer
+               FROM exam_questions eq
+               INNER JOIN questions q ON eq.question_id = q.id
+               WHERE eq.exam_id = ?`,
+              [id]
+            );
+            const validIds = new Set(examQRows.map((q) => String(q.id)));
+            savedAnswers = parseSafeDraftAnswers(
+              existingAttempt[0].draft_answers_json,
+              validIds
+            );
+            for (const q of examQRows) {
+              const choice = savedAnswers[String(q.id)];
+              if (choice && choice === q.correct_answer) {
+                correctCount++;
+              }
             }
+            totalQ = examQRows.length;
+            autoScore =
+              totalQ > 0 ? Number(((correctCount / totalQ) * 10).toFixed(2)) : 0;
           }
-          const totalQ = examQRows.length;
-          const autoScore =
-            totalQ > 0 ? Number(((correctCount / totalQ) * 10).toFixed(2)) : 0;
+
           const recordedTabSwitches = isAntiCheatExam
             ? Math.max(0, Number(existingAttempt[0].tab_switch_count) || 0)
             : 0;
@@ -283,8 +319,8 @@ export async function getExamById(req, res, next) {
 
           await pool.query(
             `INSERT INTO submissions
-              (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, answers_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, answers_json, attempt_blueprint_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               Number(id),
               req.user.id,
@@ -296,6 +332,7 @@ export async function getExamById(req, res, next) {
               recordedTabSwitches,
               recordedUnfocused,
               JSON.stringify(savedAnswers),
+              prevBlueprint ? JSON.stringify(prevBlueprint) : null,
             ]
           );
           await pool.query(
@@ -328,7 +365,11 @@ export async function getExamById(req, res, next) {
       ]),
     ]);
 
-    const questionCount = Number(qCountRow[0]?.cnt || 0);
+    const matrixCount =
+      (Number(exam.easy_count) || 0) +
+      (Number(exam.medium_count) || 0) +
+      (Number(exam.hard_count) || 0);
+    const questionCount = matrixCount > 0 ? matrixCount : Number(qCountRow[0]?.cnt || 0);
     const submissionCount = Number(subCountRow[0]?.cnt || 0);
     const myAttemptCount = Number(mySubCountRow[0]?.cnt || 0);
 
@@ -367,26 +408,8 @@ export async function getExamById(req, res, next) {
     );
 
     const isStudentTaking = req.user?.role === "STUDENT" || mode === "take";
-    let formattedQuestions = questionRows.map((q) => {
-      if (isStudentTaking) {
-        return {
-          id: q.id,
-          subject_id: q.subject_id,
-          content: q.content,
-          option_a: q.option_a,
-          option_b: q.option_b,
-          option_c: q.option_c,
-          option_d: q.option_d,
-          difficulty: q.difficulty,
-          order_index: q.order_index,
-        };
-      }
-      return q;
-    });
-
-    if (isStudentTaking && Boolean(exam.shuffle_questions)) {
-      formattedQuestions = shuffleArray(formattedQuestions);
-    }
+    let formattedQuestions = [];
+    let optionsPreShuffled = false;
 
     let currentTabSwitchCount = 0;
     let currentUnfocusedSeconds = 0;
@@ -395,21 +418,40 @@ export async function getExamById(req, res, next) {
     const baseDurationSec = (Number(exam.duration_minutes) || 30) * 60;
     let effectiveDurationSeconds = baseDurationSec;
     let remainingSeconds = baseDurationSec;
+
     if (req.user?.role === "STUDENT") {
+      const [currentAttemptCheck] = await pool.query(
+        "SELECT status, attempt_blueprint_json FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
+        [id, req.user.id]
+      );
+      let activeBlueprint =
+        currentAttemptCheck.length > 0 &&
+        currentAttemptCheck[0].status === "IN_PROGRESS"
+          ? parseAttemptBlueprint(currentAttemptCheck[0].attempt_blueprint_json)
+          : null;
+
+      if (!activeBlueprint) {
+        activeBlueprint = await generateAttemptBlueprint(pool, exam, questionRows);
+      }
+      const serializedBlueprint = JSON.stringify(activeBlueprint);
+
       await pool.query(
         `INSERT INTO exam_attempts
-          (exam_id, user_id, started_at, status, tab_switch_count, unfocused_seconds, draft_answers_json, last_violation_at, last_violation_reason)
-         VALUES (?, ?, NOW(), 'IN_PROGRESS', 0, 0, NULL, NULL, NULL)
+          (exam_id, user_id, started_at, status, tab_switch_count, unfocused_seconds, is_unfocused, draft_answers_json, attempt_blueprint_json, last_violation_at, last_violation_reason)
+         VALUES (?, ?, NOW(), 'IN_PROGRESS', 0, 0, 0, NULL, ?, NULL, NULL)
          ON DUPLICATE KEY UPDATE
            started_at = IF(status = 'IN_PROGRESS', started_at, NOW()),
            tab_switch_count = IF(status = 'IN_PROGRESS', tab_switch_count, 0),
            unfocused_seconds = IF(status = 'IN_PROGRESS', unfocused_seconds, 0),
+           is_unfocused = IF(status = 'IN_PROGRESS', is_unfocused, 0),
            draft_answers_json = IF(status = 'IN_PROGRESS', draft_answers_json, NULL),
+           attempt_blueprint_json = IF(status = 'IN_PROGRESS' AND attempt_blueprint_json IS NOT NULL, attempt_blueprint_json, VALUES(attempt_blueprint_json)),
            last_violation_at = IF(status = 'IN_PROGRESS', last_violation_at, NULL),
            last_violation_reason = IF(status = 'IN_PROGRESS', last_violation_reason, NULL),
            status = 'IN_PROGRESS'`,
-        [id, req.user.id]
+        [id, req.user.id, serializedBlueprint]
       );
+      emitProctorStudentState(id, req.user.id);
 
       const [activeAttempt] = await pool.query(
         `SELECT
@@ -417,12 +459,36 @@ export async function getExamById(req, res, next) {
            TIMESTAMPDIFF(SECOND, started_at, NOW()) AS elapsed_seconds,
            tab_switch_count,
            unfocused_seconds,
-           draft_answers_json
+           draft_answers_json,
+           attempt_blueprint_json
          FROM exam_attempts
          WHERE exam_id = ? AND user_id = ?
          LIMIT 1`,
         [id, req.user.id]
       );
+
+      const resolvedBlueprint =
+        parseAttemptBlueprint(activeAttempt[0]?.attempt_blueprint_json) ||
+        activeBlueprint;
+      const blueprintQuestionIds = resolvedBlueprint.items.map((it) => it.questionId);
+      const [drawnQuestionRows] =
+        blueprintQuestionIds.length > 0
+          ? await pool.query(
+              `SELECT id, subject_id, content, option_a, option_b, option_c, option_d, difficulty
+               FROM questions
+               WHERE id IN (?)`,
+              [blueprintQuestionIds]
+            )
+          : [[]];
+      const drawnById = new Map(drawnQuestionRows.map((q) => [Number(q.id), q]));
+
+      formattedQuestions = formatQuestionsWithBlueprint(
+        resolvedBlueprint,
+        drawnById,
+        { forExamRoom: true }
+      );
+      optionsPreShuffled = true;
+
       currentTabSwitchCount = isAntiCheatExam
         ? Math.max(0, Number(activeAttempt[0]?.tab_switch_count) || 0)
         : 0;
@@ -430,7 +496,7 @@ export async function getExamById(req, res, next) {
         0,
         Number(activeAttempt[0]?.unfocused_seconds) || 0
       );
-      const validIds = new Set(questionRows.map((q) => String(q.id)));
+      const validIds = new Set(blueprintQuestionIds.map(String));
       draftAnswers = parseSafeDraftAnswers(
         activeAttempt[0]?.draft_answers_json,
         validIds
@@ -448,13 +514,31 @@ export async function getExamById(req, res, next) {
       }
       const elapsedSec = Math.max(0, Number(activeAttempt[0]?.elapsed_seconds) || 0);
       remainingSeconds = Math.max(0, effectiveDurationSeconds - elapsedSec);
+    } else if (isStudentTaking) {
+      formattedQuestions = questionRows.map((q) => ({
+        id: q.id,
+        subject_id: q.subject_id,
+        content: q.content,
+        option_a: q.option_a,
+        option_b: q.option_b,
+        option_c: q.option_c,
+        option_d: q.option_d,
+        difficulty: q.difficulty,
+        order_index: q.order_index,
+      }));
+      if (Boolean(exam.shuffle_questions)) {
+        formattedQuestions = shuffleArray(formattedQuestions);
+      }
+    } else {
+      formattedQuestions = questionRows;
     }
 
     return res.status(200).json({
       success: true,
       data: {
         ...exam,
-        question_count: questionCount,
+        question_count:
+          req.user?.role === "STUDENT" ? formattedQuestions.length : questionCount,
         submission_count: submissionCount,
         my_attempt_count: myAttemptCount,
         started_at: activeStartedAt,
@@ -463,6 +547,7 @@ export async function getExamById(req, res, next) {
         current_tab_switch_count: currentTabSwitchCount,
         current_unfocused_seconds: currentUnfocusedSeconds,
         draft_answers: draftAnswers,
+        options_pre_shuffled: optionsPreShuffled,
         questions: formattedQuestions,
       },
     });
@@ -493,14 +578,17 @@ async function saveExam(req, res, next, isUpdate) {
       sessionMode = "FREE",
       examSession = "",
       examShift = "",
-      shuffleQuestions = 0,
-      shuffleOptions = 0,
+      shuffleQuestions = 1,
+      shuffleOptions = 1,
+      easyCount,
+      mediumCount,
+      hardCount,
       antiCheat = 0,
       maxTabSwitches = null,
       maxAttempts = null,
       openAt = null,
       closeAt = null,
-      questionIds,
+      questionIds = [],
     } = req.body;
 
     const resolveMaxTabSwitches = (antiCheatFlag, val) => {
@@ -598,6 +686,15 @@ async function saveExam(req, res, next, isUpdate) {
     let finalMaxTabSwitches = resolveMaxTabSwitches(Boolean(antiCheat), maxTabSwitches);
     let finalMaxAttempts = parseOptionalAttempts(maxAttempts);
 
+    const hasExplicitMatrix =
+      easyCount !== undefined || mediumCount !== undefined || hardCount !== undefined;
+    let finalEasyCount = Math.max(0, Number(easyCount) || 0);
+    let finalMediumCount = Math.max(0, Number(mediumCount) || 0);
+    let finalHardCount = Math.max(0, Number(hardCount) || 0);
+    let resolvedQuestionIds = Array.isArray(questionIds)
+      ? questionIds.map(Number)
+      : [];
+
     if (!isUpdate && sessionMode === "NEW_SESSION") {
       if (!cleanSession) {
         await connection.rollback();
@@ -656,12 +753,19 @@ async function saveExam(req, res, next, isUpdate) {
         }
 
         const tpl = templateRows[0];
-        const requiredCount = Number(tpl.question_count);
-        if (questionIds.length !== requiredCount) {
+        const tplTotal =
+          (Number(tpl.easy_count) || 0) +
+            (Number(tpl.medium_count) || 0) +
+            (Number(tpl.hard_count) || 0) || Number(tpl.question_count);
+        const incomingCount =
+          resolvedQuestionIds.length > 0
+            ? resolvedQuestionIds.length
+            : finalEasyCount + finalMediumCount + finalHardCount;
+        if (incomingCount !== tplTotal) {
           await connection.rollback();
           return res.status(400).json({
             success: false,
-            message: `Đợt thi "${cleanSession}" yêu cầu chọn đúng ${requiredCount} câu hỏi để đồng bộ với các ca trước.`,
+            message: `Đợt thi "${cleanSession}" yêu cầu chọn đúng ${tplTotal} câu hỏi để đồng bộ với các ca trước.`,
           });
         }
         finalDuration = Number(tpl.duration_minutes);
@@ -675,12 +779,60 @@ async function saveExam(req, res, next, isUpdate) {
       }
     }
 
-    const [questions] = await connection.query(
-      "SELECT id FROM questions WHERE subject_id = ? AND id IN (?) FOR UPDATE",
-      [Number(subjectId), questionIds.map(Number)]
-    );
-    if (questions.length !== questionIds.length) {
-      throw Object.assign(new Error("Tất cả câu hỏi phải tồn tại và thuộc môn học đã chọn."), { statusCode: 400 });
+    if (resolvedQuestionIds.length > 0) {
+      const [selectedRows] = await connection.query(
+        "SELECT id, difficulty FROM questions WHERE subject_id = ? AND id IN (?) FOR UPDATE",
+        [Number(subjectId), resolvedQuestionIds]
+      );
+      if (selectedRows.length !== resolvedQuestionIds.length) {
+        throw Object.assign(
+          new Error("Tất cả câu hỏi phải tồn tại và thuộc môn học đã chọn."),
+          { statusCode: 400 }
+        );
+      }
+      if (!hasExplicitMatrix || finalEasyCount + finalMediumCount + finalHardCount === 0) {
+        finalEasyCount = 0;
+        finalMediumCount = 0;
+        finalHardCount = 0;
+        for (const q of selectedRows) {
+          if (q.difficulty === "EASY") finalEasyCount++;
+          else if (q.difficulty === "HARD") finalHardCount++;
+          else finalMediumCount++;
+        }
+      }
+    }
+
+    if (hasExplicitMatrix && finalEasyCount + finalMediumCount + finalHardCount > 0) {
+      const [bankRows] = await connection.query(
+        "SELECT id, difficulty FROM questions WHERE subject_id = ? FOR UPDATE",
+        [Number(subjectId)]
+      );
+      const easyPool = bankRows.filter((q) => q.difficulty === "EASY");
+      const mediumPool = bankRows.filter(
+        (q) => (q.difficulty || "MEDIUM") === "MEDIUM"
+      );
+      const hardPool = bankRows.filter((q) => q.difficulty === "HARD");
+
+      if (
+        easyPool.length < finalEasyCount ||
+        mediumPool.length < finalMediumCount ||
+        hardPool.length < finalHardCount
+      ) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Ngân hàng môn học hiện không đủ câu hỏi theo ma trận yêu cầu (Có sẵn: ${easyPool.length} Dễ, ${mediumPool.length} Trung bình, ${hardPool.length} Khó).`,
+        });
+      }
+
+      if (resolvedQuestionIds.length === 0) {
+        const sampled = [
+          ...cryptoShuffle(easyPool).slice(0, finalEasyCount),
+          ...cryptoShuffle(mediumPool).slice(0, finalMediumCount),
+          ...cryptoShuffle(hardPool).slice(0, finalHardCount),
+        ];
+        resolvedQuestionIds = sampled.map((q) => Number(q.id));
+      }
     }
 
     const values = [
@@ -695,6 +847,9 @@ async function saveExam(req, res, next, isUpdate) {
       cleanShift,
       finalShuffleQuestions,
       finalShuffleOptions,
+      finalEasyCount,
+      finalMediumCount,
+      finalHardCount,
       finalAntiCheat,
       finalMaxTabSwitches,
       finalMaxAttempts,
@@ -707,8 +862,9 @@ async function saveExam(req, res, next, isUpdate) {
         `UPDATE exams
          SET subject_id = ?, title = ?, description = ?, duration_minutes = ?, pass_score = ?,
              is_published = ?, major_group = ?, exam_session = ?, exam_shift = ?,
-             shuffle_questions = ?, shuffle_options = ?, anti_cheat = ?,
-             max_tab_switches = ?, max_attempts = ?, open_at = ?, close_at = ?
+             shuffle_questions = ?, shuffle_options = ?,
+             easy_count = ?, medium_count = ?, hard_count = ?,
+             anti_cheat = ?, max_tab_switches = ?, max_attempts = ?, open_at = ?, close_at = ?
          WHERE id = ?`,
         [...values, examId]
       );
@@ -717,27 +873,30 @@ async function saveExam(req, res, next, isUpdate) {
       const [result] = await connection.query(
         `INSERT INTO exams
           (subject_id, title, description, duration_minutes, pass_score, is_published, major_group,
-           exam_session, exam_shift, shuffle_questions, shuffle_options, anti_cheat,
-           max_tab_switches, max_attempts, open_at, close_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           exam_session, exam_shift, shuffle_questions, shuffle_options,
+           easy_count, medium_count, hard_count,
+           anti_cheat, max_tab_switches, max_attempts, open_at, close_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [...values, req.user.id]
       );
       examId = result.insertId;
     }
-    for (const [index, questionId] of questionIds.entries()) {
+    for (const [index, questionId] of resolvedQuestionIds.entries()) {
       await connection.query(
         "INSERT INTO exam_questions (exam_id, question_id, order_index) VALUES (?, ?, ?)",
         [examId, Number(questionId), index + 1]
       );
     }
+    const totalConfiguredCount =
+      finalEasyCount + finalMediumCount + finalHardCount || resolvedQuestionIds.length;
     await logAdminAction(connection, {
       user: req.user,
       actionType: isUpdate ? "UPDATE_EXAM" : "CREATE_EXAM",
       examTitle: title.trim(),
       subjectCode,
       details: isUpdate
-        ? `Cập nhật đề thi (${questionIds.length} câu hỏi, ${Number(durationMinutes)} phút)`
-        : `Thêm đề mới gồm ${questionIds.length} câu hỏi (${Number(durationMinutes)} phút)`,
+        ? `Cập nhật đề thi (${totalConfiguredCount} câu: ${finalEasyCount} Dễ / ${finalMediumCount} TB / ${finalHardCount} Khó, ${Number(durationMinutes)} phút)`
+        : `Thêm đề mới gồm ${totalConfiguredCount} câu (${finalEasyCount} Dễ / ${finalMediumCount} TB / ${finalHardCount} Khó, ${Number(durationMinutes)} phút)`,
     });
     await connection.commit();
     return res.status(isUpdate ? 200 : 201).json({
@@ -944,6 +1103,7 @@ export async function getExamLeaderboard(req, res, next) {
     const [subRows] = await pool.query(
       `SELECT
          sub.id AS submission_id,
+         sub.exam_id,
          sub.student_id,
          sub.score,
          sub.correct_count,
@@ -955,6 +1115,8 @@ export async function getExamLeaderboard(req, res, next) {
          sub.unfocused_seconds,
          sub.is_suspended,
          sub.suspend_reason,
+         sub.answers_json,
+         sub.attempt_blueprint_json,
          u.full_name,
          u.student_code,
          u.major_group
@@ -986,7 +1148,7 @@ export async function getExamLeaderboard(req, res, next) {
 
     let currentRank = 0;
     let prevKey = null;
-    const leaderboard = subRows.map((row, idx) => {
+    const rankedRows = subRows.map((row, idx) => {
       const k = tieKey(row);
       if (k !== prevKey) {
         currentRank = idx + 1;
@@ -998,6 +1160,35 @@ export async function getExamLeaderboard(req, res, next) {
         is_tied: (keyCounts.get(k) || 0) > 1,
       };
     });
+
+    const [subjectQuestionRows] = await pool.query(
+      "SELECT id, correct_answer FROM questions WHERE subject_id = ?",
+      [exam.subject_id]
+    );
+    const [linkedEqRows] = await pool.query(
+      "SELECT question_id FROM exam_questions WHERE exam_id = ?",
+      [id]
+    );
+    const questionsById = new Map(
+      subjectQuestionRows.map((q) => [Number(q.id), q])
+    );
+    const linkedIdsMap = new Map([
+      [Number(exam.id), linkedEqRows.map((r) => Number(r.question_id))],
+    ]);
+    const {
+      enrichedSubmissions,
+      suspiciousPairs,
+      anomalySummary,
+    } = analyzeSubmissionsAnomalies(
+      rankedRows,
+      new Map([[Number(exam.id), exam]]),
+      questionsById,
+      linkedIdsMap
+    );
+
+    const leaderboard = enrichedSubmissions.map(
+      ({ answers_json, attempt_blueprint_json, ...cleanRow }) => cleanRow
+    );
 
     const [inProgressRows] = await pool.query(
       `SELECT
@@ -1044,6 +1235,8 @@ export async function getExamLeaderboard(req, res, next) {
           avgScore,
           passRate,
         },
+        anomalySummary,
+        suspiciousPairs,
         leaderboard,
         inProgress: inProgressRows,
       },

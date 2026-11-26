@@ -59,6 +59,8 @@ import {
   unsuspendSubmission,
   recordExamViolation,
   getExamAttemptStatus,
+  getLiveExamProctoring,
+  reviewExamViolation,
 } from "../controllers/submissionController.js";
 
 const router = express.Router();
@@ -188,6 +190,8 @@ router.get("/exams", verifyToken, examFetchLimiter, getExams);
 router.get("/exams/admin-overview", verifyToken, requireRole("TEACHER"), getAdminExamOverview);
 router.get("/exams/admin-logs", verifyToken, requireRole("TEACHER"), getAdminLogs);
 router.get("/exams/:id/leaderboard", verifyToken, requireRole("TEACHER"), getExamLeaderboard);
+router.get("/exams/:id/live-proctoring", verifyToken, requireRole("TEACHER"), getLiveExamProctoring);
+router.patch("/exams/:id/violations/:violationId/review", verifyToken, requireRole("TEACHER"), reviewExamViolation);
 router.get("/exams/:id/attempt-status", verifyToken, requireRole("STUDENT"), getExamAttemptStatus);
 router.put("/exams/:id/progress", verifyToken, requireRole("STUDENT"), examProgressLimiter, syncExamProgress);
 router.get("/exams/:id", verifyToken, examFetchLimiter, getExamById);

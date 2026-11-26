@@ -55,10 +55,50 @@ export function validateExam(body, { isMetadataOnly = false } = {}) {
   if (body.majorGroup !== undefined && !["ALL", "KY_THUAT", "KINH_TE"].includes(body.majorGroup)) {
     return "Khối ngành áp dụng cho đề thi không hợp lệ.";
   }
-  if (!Array.isArray(body.questionIds) || body.questionIds.length === 0 || !body.questionIds.every(isId)) {
+
+  const hasMatrixFields =
+    body.easyCount !== undefined ||
+    body.mediumCount !== undefined ||
+    body.hardCount !== undefined;
+  if (hasMatrixFields) {
+    for (const rawCount of [
+      body.easyCount ?? 0,
+      body.mediumCount ?? 0,
+      body.hardCount ?? 0,
+    ]) {
+      if (
+        !isNumber(rawCount) ||
+        !Number.isInteger(Number(rawCount)) ||
+        Number(rawCount) < 0
+      ) {
+        return "Số lượng câu hỏi theo mức độ Dễ / Trung bình / Khó phải là số nguyên không âm.";
+      }
+    }
+  }
+  const matrixTotal =
+    (Number(body.easyCount) || 0) +
+    (Number(body.mediumCount) || 0) +
+    (Number(body.hardCount) || 0);
+
+  if (body.questionIds !== undefined && !Array.isArray(body.questionIds)) {
     return "Đề thi phải có ít nhất một câu hỏi hợp lệ.";
   }
-  if (new Set(body.questionIds.map(Number)).size !== body.questionIds.length) return "Danh sách câu hỏi bị trùng.";
+
+  const hasQuestionIds =
+    Array.isArray(body.questionIds) && body.questionIds.length > 0;
+
+  if (!hasQuestionIds && matrixTotal <= 0) {
+    return "Đề thi phải có ít nhất một câu hỏi hợp lệ.";
+  }
+
+  if (hasQuestionIds) {
+    if (!body.questionIds.every(isId)) {
+      return "Đề thi phải có ít nhất một câu hỏi hợp lệ.";
+    }
+    if (new Set(body.questionIds.map(Number)).size !== body.questionIds.length) {
+      return "Danh sách câu hỏi bị trùng.";
+    }
+  }
   return "";
 }
 
