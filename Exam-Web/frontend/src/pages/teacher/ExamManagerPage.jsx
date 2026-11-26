@@ -1593,6 +1593,7 @@ export default function ExamManagerPage() {
                   <th>Đề thi & Môn học</th>
                   <th>Số câu đúng</th>
                   <th>Điểm số</th>
+                  <th>Giám sát thi</th>
                   <th>Thời gian nộp</th>
                   <th style={{ textAlign: "right" }}>Thao tác</th>
                 </tr>
@@ -1600,6 +1601,8 @@ export default function ExamManagerPage() {
               <tbody>
                 {submissions.map((sub) => {
                   const score = Number(sub.score);
+                  const tabSwitches = Math.max(0, Number(sub.tab_switch_count) || 0);
+                  const unfocusedSec = Math.max(0, Number(sub.unfocused_seconds) || 0);
                   return (
                     <tr key={sub.id}>
                       <td>
@@ -1628,6 +1631,24 @@ export default function ExamManagerPage() {
                         >
                           {score.toFixed(2)} / 10
                         </span>
+                      </td>
+                      <td>
+                        <div>
+                          <span
+                            className={`tab-switch-badge ${
+                              tabSwitches === 0
+                                ? "safe"
+                                : tabSwitches <= 2
+                                ? "warn"
+                                : "danger"
+                            }`}
+                          >
+                            Vi phạm: {tabSwitches} lần
+                          </span>
+                        </div>
+                        <div className="sub-text" style={{ marginTop: "4px" }}>
+                          Mất focus: <strong>{unfocusedSec}s</strong>
+                        </div>
                       </td>
                       <td>
                         {new Date(sub.submitted_at).toLocaleString("vi-VN")}

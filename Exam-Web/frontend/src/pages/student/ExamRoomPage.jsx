@@ -4,6 +4,9 @@ import axiosClient from "../../api/axiosClient";
 import { useExamStore } from "../../store/useExamStore";
 import { useAuth } from "../../context/AuthContext";
 import { useDialog, ZaloAppealBox } from "../../context/DialogContext";
+import PreExamChecklistModal from "../../components/exam/PreExamChecklistModal";
+
+const BLUR_GRACE_MS = 3000;
 
 function formatClock(seconds) {
   const safe = Math.max(0, seconds);
@@ -24,6 +27,17 @@ function seededShuffle(items, seedStr) {
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr;
+}
+
+function extractValidAnswers(raw) {
+  const clean = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return clean;
+  for (const [k, v] of Object.entries(raw)) {
+    if (["A", "B", "C", "D"].includes(v)) {
+      clean[String(k)] = v;
+    }
+  }
+  return clean;
 }
 
 export default function ExamRoomPage() {
@@ -50,9 +64,20 @@ export default function ExamRoomPage() {
     tickTimer,
     incrementTabSwitch,
     setTabSwitchCount,
+    addUnfocusedMs,
     resetExamSession,
   } = useExamStore();
 
+  const [checklistVerified, setChecklistVerified] = useState(() => {
+    try {
+      if (sessionStorage.getItem(`ptit_pre_exam_checked_${id}`) === "1") {
+        return true;
+      }
+    } catch {}
+    const saved = useExamStore.getState();
+    return Number(saved.activeExam?.id) === Number(id) && saved.questions?.length > 0;
+  });
+  const [previewExam, setPreviewExam] = useState(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
@@ -63,8 +88,49 @@ export default function ExamRoomPage() {
   const submitLockRef = useRef(false);
   const lastTabSwitchRef = useRef(0);
   const autoSubmitTimerRef = useRef(null);
+  const draftSyncTimerRef = useRef(null);
+  const blurGraceTimerRef = useRef(null);
+  const unfocusedSinceRef = useRef(null);
+  const episodePenalizedRef = useRef(false);
   const ignoreBlurUntilRef = useRef(0);
+  const latestAnswersRef = useRef({});
   const handleFinalSubmitRef = useRef(null);
+
+  useEffect(() => {
+    const clean = extractValidAnswers(answers);
+    if (Object.keys(clean).length > 0) {
+      latestAnswersRef.current = clean;
+    }
+  }, [answers]);
+
+  const getSnapshotAnswers = useCallback(() => {
+    const storeClean = extractValidAnswers(useExamStore.getState().answers);
+    if (Object.keys(storeClean).length > 0) {
+      return storeClean;
+    }
+    return extractValidAnswers(latestAnswersRef.current);
+  }, []);
+
+  const flushUnfocusSeconds = useCallback(() => {
+    if (unfocusedSinceRef.current !== null) {
+      const now = Date.now();
+      const deltaMs = Math.max(0, now - unfocusedSinceRef.current);
+      if (deltaMs > 0) {
+        addUnfocusedMs(deltaMs);
+      }
+      unfocusedSinceRef.current =
+        !document.hidden && document.hasFocus() ? null : now;
+    }
+    const totalMs = useExamStore.getState().unfocusedMs || 0;
+    return totalMs <= 0 ? 0 : Math.max(1, Math.round(totalMs / 1000));
+  }, [addUnfocusedMs]);
+
+  const clearBlurGraceTimer = useCallback(() => {
+    if (blurGraceTimerRef.current) {
+      clearTimeout(blurGraceTimerRef.current);
+      blurGraceTimerRef.current = null;
+    }
+  }, []);
 
   const lockRoomWithModal = useCallback(
     ({
@@ -76,9 +142,14 @@ export default function ExamRoomPage() {
       submitLockRef.current = true;
       setSubmitting(false);
       setShowConfirmModal(false);
+      clearBlurGraceTimer();
       if (autoSubmitTimerRef.current) {
         clearTimeout(autoSubmitTimerRef.current);
         autoSubmitTimerRef.current = null;
+      }
+      if (draftSyncTimerRef.current) {
+        clearTimeout(draftSyncTimerRef.current);
+        draftSyncTimerRef.current = null;
       }
       if (document.fullscreenElement && document.exitFullscreen) {
         document.exitFullscreen().catch(() => {});
@@ -90,11 +161,38 @@ export default function ExamRoomPage() {
         actionLabel,
       });
     },
-    []
+    [clearBlurGraceTimer]
   );
 
   useEffect(() => {
-    if (!user?.id) return;
+    if (!user?.id || checklistVerified) return;
+    let cancelled = false;
+    setLoading(true);
+    axiosClient
+      .get(`/exams/${id}?mode=preview`)
+      .then((res) => {
+        if (cancelled) return;
+        setPreviewExam(res.data.data);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        showToast(
+          err.response?.data?.message || "Không thể tải thông tin đề thi.",
+          "error"
+        );
+        navigate(err.response?.data?.isSuspended ? "/my-results" : "/");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id, user?.id, checklistVerified, navigate, showToast]);
+
+  useEffect(() => {
+    if (!user?.id || !checklistVerified) return;
     let cancelled = false;
     submitLockRef.current = false;
     setSubmitting(false);
@@ -103,12 +201,22 @@ export default function ExamRoomPage() {
       .get(`/exams/${id}?mode=take`)
       .then((res) => {
         if (cancelled) return;
-        if (!res.data.data.questions?.length) throw new Error("Đề thi chưa có câu hỏi.");
-        startExamSession(res.data.data, user.id);
-        if (!Boolean(Number(res.data.data.anti_cheat))) {
+        const examPayload = res.data.data;
+        if (!examPayload.questions?.length) {
+          throw new Error("Đề thi chưa có câu hỏi.");
+        }
+        const prevActiveId = useExamStore.getState().activeExam?.id;
+        if (Number(prevActiveId) !== Number(examPayload.id)) {
+          latestAnswersRef.current = extractValidAnswers(examPayload.draft_answers);
+        }
+        startExamSession(examPayload, user.id);
+        latestAnswersRef.current = extractValidAnswers(
+          useExamStore.getState().answers
+        );
+        if (!Boolean(Number(examPayload.anti_cheat))) {
           setTabSwitchCount(0);
-        } else if (typeof res.data.data.current_tab_switch_count === "number") {
-          setTabSwitchCount(res.data.data.current_tab_switch_count);
+        } else if (typeof examPayload.current_tab_switch_count === "number") {
+          setTabSwitchCount(examPayload.current_tab_switch_count);
         }
       })
       .catch((err) => {
@@ -126,7 +234,61 @@ export default function ExamRoomPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, user?.id, navigate, startExamSession, setTabSwitchCount, showToast]);
+  }, [
+    id,
+    user?.id,
+    checklistVerified,
+    navigate,
+    startExamSession,
+    setTabSwitchCount,
+    showToast,
+  ]);
+
+  useEffect(() => {
+    if (loading || !checklistVerified || !activeExam || submitLockRef.current) return;
+    const currentAnswers = extractValidAnswers(answers);
+    if (Object.keys(currentAnswers).length === 0) return;
+
+    const pushProgress = () => {
+      if (submitLockRef.current) return;
+      const snapshot = getSnapshotAnswers();
+      const unfocusedSec = flushUnfocusSeconds();
+      axiosClient
+        .put(`/exams/${id}/progress`, {
+          answers: snapshot,
+          unfocused_seconds: unfocusedSec,
+        })
+        .catch(() => {});
+    };
+
+    if (useExamStore.getState().remainingSeconds <= 15) {
+      pushProgress();
+      return;
+    }
+
+    if (draftSyncTimerRef.current) {
+      clearTimeout(draftSyncTimerRef.current);
+    }
+    draftSyncTimerRef.current = setTimeout(() => {
+      draftSyncTimerRef.current = null;
+      pushProgress();
+    }, 450);
+
+    return () => {
+      if (draftSyncTimerRef.current) {
+        clearTimeout(draftSyncTimerRef.current);
+        draftSyncTimerRef.current = null;
+      }
+    };
+  }, [
+    id,
+    loading,
+    checklistVerified,
+    activeExam,
+    answers,
+    getSnapshotAnswers,
+    flushUnfocusSeconds,
+  ]);
 
   const handleFinalSubmit = useCallback(
     async (isAuto = false, autoReason = "timeout") => {
@@ -134,44 +296,62 @@ export default function ExamRoomPage() {
       submitLockRef.current = true;
       setSubmitting(true);
       setShowConfirmModal(false);
+      clearBlurGraceTimer();
+      if (draftSyncTimerRef.current) {
+        clearTimeout(draftSyncTimerRef.current);
+        draftSyncTimerRef.current = null;
+      }
 
+      const totalUnfocusedSeconds = flushUnfocusSeconds();
+      const finalAnswers = getSnapshotAnswers();
       const currentState = useExamStore.getState();
-      const timeSpent = Math.min(currentState.totalSeconds, Math.max(
-        0, currentState.totalSeconds - Math.ceil((currentState.deadline - Date.now()) / 1000)
-      ));
+      const safeTotalSec = Math.max(0, Math.floor(Number(currentState.totalSeconds) || 0));
+      const rawSpent =
+        safeTotalSec - Math.ceil((currentState.deadline - Date.now()) / 1000);
+      const timeSpent = Math.min(safeTotalSec, Math.max(0, Math.round(rawSpent)));
 
       try {
         const res = await axiosClient.post("/submissions", {
           examId: Number(id),
-          answers: currentState.answers,
+          answers: finalAnswers,
           timeSpentSeconds: timeSpent,
           started_at: currentState.startedAt,
           tab_switch_count: currentState.tabSwitchCount || 0,
+          unfocused_seconds: totalUnfocusedSeconds,
         });
         const submissionId = res.data.data.submissionId;
         const finalTabCount = currentState.tabSwitchCount || 0;
+        const maxSwitches =
+          Number(currentState.activeExam?.max_tab_switches) >= 1
+            ? Number(currentState.activeExam.max_tab_switches)
+            : 3;
+
+        latestAnswersRef.current = {};
+        resetExamSession();
+
         if (isAuto && autoReason === "tabLimit") {
           lockRoomWithModal({
-            title: "🚫 Bài thi đã bị đình chỉ / thu bài do vi phạm quy chế",
-            reason: `Bạn đã rời tab / thoát toàn màn hình vượt quá giới hạn cho phép (${finalTabCount} lần). Hệ thống đã tự động thu bài của bạn.`,
+            title: "🚫 Bài thi đã tự động thu do vượt quá số lần vi phạm",
+            reason: `Bạn đã rời tab / mất focus quá 3s / thoát toàn màn hình vượt quá giới hạn cho phép (${finalTabCount}/${maxSwitches} lần). Hệ thống đã tự động thu bài và chấm điểm toàn bộ đáp án bạn đã chọn.`,
             nextPath: `/results/${submissionId}`,
             actionLabel: "Xem kết quả bài thi",
           });
           return;
         }
-        resetExamSession();
+
         if (document.fullscreenElement && document.exitFullscreen) {
           document.exitFullscreen().catch(() => {});
         }
         if (isAuto) {
           showToast(
-            "⏰ Đã hết thời gian làm bài! Hệ thống đã tự động thu bài của bạn.",
+            "⏰ Đã hết thời gian làm bài! Hệ thống đã tự động thu bài và chấm điểm của bạn.",
             "warning"
           );
         }
         navigate(`/results/${submissionId}`, { replace: true });
       } catch (err) {
         if (err.response?.data?.isSuspended) {
+          latestAnswersRef.current = {};
           lockRoomWithModal({
             title: "🚫 Bài thi đã bị đình chỉ / thu bài do vi phạm quy chế",
             reason:
@@ -184,23 +364,28 @@ export default function ExamRoomPage() {
           return;
         }
         if (err.response?.data?.isExpired || err.response?.status === 409) {
+          const autoSubId = err.response?.data?.data?.submissionId;
+          latestAnswersRef.current = {};
           resetExamSession();
           if (document.fullscreenElement && document.exitFullscreen) {
             document.exitFullscreen().catch(() => {});
           }
           showToast(
             err.response?.data?.message || "Lượt làm bài đã kết thúc.",
-            err.response?.status === 409 ? "warning" : "error"
+            "warning"
           );
-          navigate("/my-results", { replace: true });
+          navigate(autoSubId ? `/results/${autoSubId}` : "/my-results", {
+            replace: true,
+          });
           return;
         }
+
         submitLockRef.current = false;
         setSubmitting(false);
         const status = err.response?.status;
-        if (isAuto && autoReason === "timeout" && (!status || status >= 500)) {
+        if (isAuto && (!status || status >= 500 || status === 429)) {
           showToast(
-            "Mất kết nối khi tự động nộp bài. Hệ thống sẽ thử gửi lại sau 3 giây...",
+            "Kết nối gián đoạn khi tự động nộp bài. Hệ thống sẽ thử gửi lại sau 3 giây...",
             "warning"
           );
           if (autoSubmitTimerRef.current) {
@@ -209,7 +394,7 @@ export default function ExamRoomPage() {
           autoSubmitTimerRef.current = setTimeout(() => {
             autoSubmitTimerRef.current = null;
             if (handleFinalSubmitRef.current) {
-              handleFinalSubmitRef.current(true, "timeout");
+              handleFinalSubmitRef.current(true, autoReason);
             }
           }, 3000);
           return;
@@ -220,7 +405,16 @@ export default function ExamRoomPage() {
         );
       }
     },
-    [id, navigate, resetExamSession, showToast, lockRoomWithModal]
+    [
+      id,
+      navigate,
+      resetExamSession,
+      showToast,
+      lockRoomWithModal,
+      clearBlurGraceTimer,
+      flushUnfocusSeconds,
+      getSnapshotAnswers,
+    ]
   );
 
   useEffect(() => {
@@ -228,7 +422,15 @@ export default function ExamRoomPage() {
   }, [handleFinalSubmit]);
 
   useEffect(() => {
-    if (loading || !activeExam || questions.length === 0 || violationModal) return;
+    if (
+      loading ||
+      !checklistVerified ||
+      !activeExam ||
+      questions.length === 0 ||
+      violationModal
+    ) {
+      return;
+    }
 
     const interval = setInterval(() => {
       if (submitLockRef.current) return;
@@ -236,15 +438,23 @@ export default function ExamRoomPage() {
       const currentRem = useExamStore.getState().remainingSeconds;
       if (currentRem <= 0) {
         clearInterval(interval);
-        handleFinalSubmit(true);
+        handleFinalSubmit(true, "timeout");
       }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [loading, activeExam, questions.length, violationModal, tickTimer, handleFinalSubmit]);
+  }, [
+    loading,
+    checklistVerified,
+    activeExam,
+    questions.length,
+    violationModal,
+    tickTimer,
+    handleFinalSubmit,
+  ]);
 
   useEffect(() => {
-    if (loading || !activeExam || violationModal) return;
+    if (loading || !checklistVerified || !activeExam || violationModal) return;
     let active = true;
 
     const checkStatus = async () => {
@@ -253,6 +463,7 @@ export default function ExamRoomPage() {
         const res = await axiosClient.get(`/exams/${id}/attempt-status`);
         if (!active || submitLockRef.current) return;
         if (res.data?.data?.isSuspended) {
+          latestAnswersRef.current = {};
           lockRoomWithModal({
             title: "🚫 Bài thi đã bị Giám thị đình chỉ (0 điểm)",
             reason:
@@ -272,16 +483,21 @@ export default function ExamRoomPage() {
       active = false;
       clearInterval(pollTimer);
     };
-  }, [id, loading, activeExam, violationModal, lockRoomWithModal]);
+  }, [id, loading, checklistVerified, activeExam, violationModal, lockRoomWithModal]);
 
   useEffect(() => {
     return () => {
+      clearBlurGraceTimer();
       if (autoSubmitTimerRef.current) {
         clearTimeout(autoSubmitTimerRef.current);
         autoSubmitTimerRef.current = null;
       }
+      if (draftSyncTimerRef.current) {
+        clearTimeout(draftSyncTimerRef.current);
+        draftSyncTimerRef.current = null;
+      }
     };
-  }, []);
+  }, [clearBlurGraceTimer]);
 
   const reportViolationToServer = useCallback(
     async (reason) => {
@@ -290,6 +506,13 @@ export default function ExamRoomPage() {
         axiosClient.defaults.baseURL || "http://localhost:5000/api"
       ).replace(/\/$/, "");
       const token = localStorage.getItem("ptit_exam_token");
+      const snapshotAnswers = getSnapshotAnswers();
+      const unfocusedSec = flushUnfocusSeconds();
+      const maxAllowedLocal =
+        Number(activeExam?.max_tab_switches) >= 1
+          ? Number(activeExam.max_tab_switches)
+          : 3;
+
       try {
         const response = await fetch(`${baseUrl}/exams/${id}/violation`, {
           method: "POST",
@@ -299,7 +522,11 @@ export default function ExamRoomPage() {
           },
           credentials: "include",
           keepalive: true,
-          body: JSON.stringify({ reason }),
+          body: JSON.stringify({
+            reason,
+            answers: snapshotAnswers,
+            unfocused_seconds: unfocusedSec,
+          }),
         });
         const json = await response.json().catch(() => null);
         if (json?.success && json.data) {
@@ -307,6 +534,7 @@ export default function ExamRoomPage() {
             setTabSwitchCount(json.data.tabSwitchCount);
           }
           if (json.data.isSuspended) {
+            latestAnswersRef.current = {};
             lockRoomWithModal({
               title: "🚫 Bài thi đã bị Giám thị đình chỉ (0 điểm)",
               reason:
@@ -318,76 +546,164 @@ export default function ExamRoomPage() {
             return json.data;
           }
           if (json.data.forceSubmit) {
-            setAntiCheatWarning(
-              `🚨 Bạn đã vi phạm quá giới hạn (${json.data.tabSwitchCount}/${json.data.maxTabSwitches}). Hệ thống đã tự động thu bài (0 điểm)!`
-            );
-            lockRoomWithModal({
-              title: "🚫 Bài thi đã bị thu bài (0 điểm) do vi phạm quy chế",
-              reason: `Bạn đã rời tab / thoát toàn màn hình vượt quá giới hạn cho phép (${json.data.tabSwitchCount}/${json.data.maxTabSwitches} lần). Hệ thống đã tự động chấm 0 điểm và đóng lượt làm bài này.`,
-              nextPath: json.data.submissionId
-                ? `/results/${json.data.submissionId}`
-                : "/my-results",
-              actionLabel: json.data.submissionId
-                ? "Xem kết quả bài thi"
-                : "Về trang Lịch sử làm bài",
-            });
+            if (json.data.submissionId) {
+              latestAnswersRef.current = {};
+              resetExamSession();
+              lockRoomWithModal({
+                title: "🚫 Bài thi đã tự động thu do vượt quá số lần vi phạm",
+                reason: `Bạn đã vượt quá giới hạn vi phạm cho phép (${json.data.tabSwitchCount}/${json.data.maxTabSwitches} lần). Hệ thống đã tự động thu bài của bạn.`,
+                nextPath: `/results/${json.data.submissionId}`,
+                actionLabel: "Xem kết quả bài thi",
+              });
+            } else if (handleFinalSubmitRef.current) {
+              handleFinalSubmitRef.current(true, "tabLimit");
+            }
           }
           return json.data;
         }
       } catch {
+        if (
+          useExamStore.getState().tabSwitchCount > maxAllowedLocal &&
+          handleFinalSubmitRef.current
+        ) {
+          handleFinalSubmitRef.current(true, "tabLimit");
+        }
         return null;
+      }
+
+      if (
+        useExamStore.getState().tabSwitchCount > maxAllowedLocal &&
+        handleFinalSubmitRef.current
+      ) {
+        handleFinalSubmitRef.current(true, "tabLimit");
       }
       return null;
     },
-    [id, activeExam?.anti_cheat, setTabSwitchCount, lockRoomWithModal]
+    [
+      id,
+      activeExam?.anti_cheat,
+      activeExam?.max_tab_switches,
+      setTabSwitchCount,
+      resetExamSession,
+      lockRoomWithModal,
+      getSnapshotAnswers,
+      flushUnfocusSeconds,
+    ]
   );
 
   useEffect(() => {
-    if (loading || !activeExam || !Boolean(Number(activeExam.anti_cheat))) return;
+    if (loading || !checklistVerified || !activeExam || violationModal) return;
 
-    const recordTabLeave = (reason = "Rời tab / Chuyển cửa sổ") => {
-      if (submitLockRef.current) return;
+    const isAntiCheatExam = Boolean(Number(activeExam.anti_cheat));
+
+    if (document.hidden || !document.hasFocus()) {
+      unfocusedSinceRef.current = Date.now();
+    }
+
+    const triggerViolationNow = (reasonText) => {
+      if (!isAntiCheatExam || submitLockRef.current) return;
       const now = Date.now();
       if (now - lastTabSwitchRef.current < 1200) return;
       lastTabSwitchRef.current = now;
       incrementTabSwitch();
-      setAntiCheatWarning(`🚨 Cảnh báo Anti-Cheat: ${reason}`);
-      reportViolationToServer(reason);
+      setAntiCheatWarning(`🚨 Cảnh báo Anti-Cheat: ${reasonText}`);
+      reportViolationToServer(reasonText);
     };
 
     const handleVisibilityChange = () => {
+      if (submitLockRef.current) return;
       if (document.hidden) {
-        recordTabLeave("Rời tab trình duyệt");
+        if (unfocusedSinceRef.current === null) {
+          unfocusedSinceRef.current = Date.now();
+        }
+        clearBlurGraceTimer();
+        episodePenalizedRef.current = true;
+        triggerViolationNow("Rời tab hoặc thu nhỏ trình duyệt");
+      } else if (document.hasFocus()) {
+        flushUnfocusSeconds();
+        episodePenalizedRef.current = false;
       }
     };
 
     const handleWindowBlur = () => {
+      if (submitLockRef.current) return;
       if (Date.now() < ignoreBlurUntilRef.current) return;
-      recordTabLeave("Chuyển sang cửa sổ khác");
+      if (unfocusedSinceRef.current === null) {
+        unfocusedSinceRef.current = Date.now();
+      }
+      if (!isAntiCheatExam || document.hidden || episodePenalizedRef.current) {
+        return;
+      }
+      clearBlurGraceTimer();
+      setAntiCheatWarning(
+        "⏳ Cửa sổ bài thi vừa mất focus! Quay lại trong vòng 3 giây để không bị tính lỗi vi phạm."
+      );
+      blurGraceTimerRef.current = setTimeout(() => {
+        blurGraceTimerRef.current = null;
+        if (submitLockRef.current || episodePenalizedRef.current) return;
+        if (document.hidden || !document.hasFocus()) {
+          episodePenalizedRef.current = true;
+          flushUnfocusSeconds();
+          triggerViolationNow("Mất focus cửa sổ quá 3 giây (Chuyển sang cửa sổ khác)");
+        }
+      }, BLUR_GRACE_MS);
+    };
+
+    const handleWindowFocus = () => {
+      const returnedWithinGrace = blurGraceTimerRef.current !== null;
+      clearBlurGraceTimer();
+      flushUnfocusSeconds();
+      episodePenalizedRef.current = false;
+      if (returnedWithinGrace && isAntiCheatExam && !submitLockRef.current) {
+        setAntiCheatWarning("");
+      }
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("focus", handleWindowFocus);
 
     return () => {
+      clearBlurGraceTimer();
+      flushUnfocusSeconds();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [loading, activeExam, incrementTabSwitch, reportViolationToServer]);
+  }, [
+    loading,
+    checklistVerified,
+    activeExam,
+    violationModal,
+    incrementTabSwitch,
+    reportViolationToServer,
+    clearBlurGraceTimer,
+    flushUnfocusSeconds,
+  ]);
 
   const requestExamFullscreen = useCallback(() => {
-    if (
-      Boolean(Number(activeExam?.anti_cheat)) &&
-      !document.fullscreenElement &&
-      document.documentElement.requestFullscreen
-    ) {
-      ignoreBlurUntilRef.current = Date.now() + 1000;
-      document.documentElement.requestFullscreen().catch(() => {});
+    if (!document.fullscreenElement) {
+      const el = document.documentElement;
+      const reqFs =
+        el.requestFullscreen ||
+        el.webkitRequestFullscreen ||
+        el.msRequestFullscreen;
+      if (reqFs) {
+        ignoreBlurUntilRef.current = Date.now() + 1000;
+        Promise.resolve(reqFs.call(el)).catch(() => {});
+      }
     }
-  }, [activeExam?.anti_cheat]);
+  }, []);
 
   useEffect(() => {
-    if (loading || !activeExam || !Boolean(Number(activeExam.anti_cheat))) return;
+    if (
+      loading ||
+      !checklistVerified ||
+      !activeExam ||
+      !Boolean(Number(activeExam.anti_cheat))
+    ) {
+      return;
+    }
 
     setIsFullscreen(Boolean(document.fullscreenElement));
     ignoreBlurUntilRef.current = Math.max(
@@ -395,7 +711,7 @@ export default function ExamRoomPage() {
       Date.now() + 1500
     );
 
-    const triggerViolation = (reasonText) => {
+    const triggerFullscreenViolation = (reasonText) => {
       if (submitLockRef.current) return;
       const now = Date.now();
       if (now - lastTabSwitchRef.current < 1200) return;
@@ -407,7 +723,9 @@ export default function ExamRoomPage() {
 
     const blockEvent = (e) => {
       e.preventDefault();
-      setAntiCheatWarning("🛡️ Chế độ Anti-Cheat: Không được phép sao chép hoặc mở menu chuột phải.");
+      setAntiCheatWarning(
+        "🛡️ Chế độ Anti-Cheat: Không được phép sao chép hoặc mở menu chuột phải."
+      );
     };
 
     const handleKeyDown = (e) => {
@@ -418,7 +736,9 @@ export default function ExamRoomPage() {
         (e.ctrlKey && key === "u");
       if (isDevToolsShortcut) {
         e.preventDefault();
-        setAntiCheatWarning("🛡️ Chế độ Anti-Cheat: Không được phép mở công cụ lập trình (DevTools / Xem nguồn).");
+        setAntiCheatWarning(
+          "🛡️ Chế độ Anti-Cheat: Không được phép mở công cụ lập trình (DevTools / Xem nguồn)."
+        );
       }
     };
 
@@ -426,7 +746,7 @@ export default function ExamRoomPage() {
       const inFs = Boolean(document.fullscreenElement);
       setIsFullscreen(inFs);
       if (!inFs && !submitLockRef.current) {
-        triggerViolation("Bạn vừa thoát khỏi chế độ Toàn màn hình.");
+        triggerFullscreenViolation("Bạn vừa thoát khỏi chế độ Toàn màn hình.");
       }
     };
 
@@ -445,7 +765,34 @@ export default function ExamRoomPage() {
       window.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
     };
-  }, [loading, activeExam, incrementTabSwitch, reportViolationToServer]);
+  }, [loading, checklistVerified, activeExam, incrementTabSwitch, reportViolationToServer]);
+
+  if (!checklistVerified) {
+    if (loading) {
+      return (
+        <div className="loading-screen">
+          <div className="spinner"></div>
+          <p>Đang tải thông tin phòng thi...</p>
+        </div>
+      );
+    }
+    return (
+      <div className="loading-screen">
+        <PreExamChecklistModal
+          open={true}
+          exam={previewExam}
+          onClose={() => navigate(`/exams/${id}`)}
+          onConfirmStart={() => {
+            try {
+              sessionStorage.setItem(`ptit_pre_exam_checked_${id}`, "1");
+            } catch {}
+            requestExamFullscreen();
+            setChecklistVerified(true);
+          }}
+        />
+      </div>
+    );
+  }
 
   if (loading || !activeExam) {
     return (
@@ -489,7 +836,6 @@ export default function ExamRoomPage() {
       className="exam-room-shell"
       style={isAntiCheat ? { userSelect: "none", WebkitUserSelect: "none" } : undefined}
     >
-
       <header className="exam-room-header">
         <div className="exam-room-brand">
           <span className="exam-subject-tag">{activeExam.subject_code}</span>
@@ -539,7 +885,7 @@ export default function ExamRoomPage() {
                 }`}
                 title="Số lần bạn rời khỏi tab hoặc cửa sổ phòng thi"
               >
-                👁️ Rời tab: <strong>{tabSwitchCount}</strong>/{maxTabSwitches}
+                👁️ Vi phạm: <strong>{tabSwitchCount}</strong>/{maxTabSwitches}
               </div>
             </>
           )}
@@ -569,7 +915,6 @@ export default function ExamRoomPage() {
       )}
 
       <div className="exam-room-body container">
-
         <section className="question-stage-card">
           <div className="question-stage-top">
             <div className="q-index-badge">
@@ -729,6 +1074,7 @@ export default function ExamRoomPage() {
           </div>
         </div>
       )}
+
       {violationModal && (
         <div className="custom-modal-backdrop">
           <div

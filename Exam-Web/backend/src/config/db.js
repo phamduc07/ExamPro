@@ -139,6 +139,7 @@ export async function initializeDatabase() {
       time_spent_seconds INT NOT NULL DEFAULT 0,
       started_at DATETIME DEFAULT NULL,
       tab_switch_count INT NOT NULL DEFAULT 0,
+      unfocused_seconds INT NOT NULL DEFAULT 0,
       is_suspended TINYINT(1) NOT NULL DEFAULT 0,
       suspend_reason VARCHAR(255) DEFAULT NULL,
       answers_json JSON NOT NULL,
@@ -187,6 +188,8 @@ export async function initializeDatabase() {
       is_suspended TINYINT(1) NOT NULL DEFAULT 0,
       suspend_reason VARCHAR(255) DEFAULT NULL,
       tab_switch_count INT NOT NULL DEFAULT 0,
+      unfocused_seconds INT NOT NULL DEFAULT 0,
+      draft_answers_json JSON DEFAULT NULL,
       last_violation_at DATETIME DEFAULT NULL,
       last_violation_reason VARCHAR(255) DEFAULT NULL,
       UNIQUE KEY uq_exam_attempt (exam_id, user_id),
@@ -586,9 +589,22 @@ async function ensureSchemaColumns() {
     try {
       await pool.query(sql);
     } catch (err) {
-      if (!["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME"].includes(err.code)) {
+      if (!["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME"].includes(err.code) && err.errno !== 1060 && err.errno !== 1061) {
         throw err;
       }
+    }
+  };
+
+  const ensureColumn = async (tableName, columnName, alterSql) => {
+    const [cols] = await pool.query(
+      `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?
+       LIMIT 1`,
+      [dbName, tableName, columnName]
+    );
+    if (cols.length === 0) {
+      await safeAlter(alterSql);
     }
   };
 
@@ -668,8 +684,13 @@ async function ensureSchemaColumns() {
   await safeAlter(
     "ALTER TABLE submissions ADD COLUMN tab_switch_count INT NOT NULL DEFAULT 0 AFTER started_at"
   );
+  await ensureColumn(
+    "submissions",
+    "unfocused_seconds",
+    "ALTER TABLE submissions ADD COLUMN unfocused_seconds INT NOT NULL DEFAULT 0 AFTER tab_switch_count"
+  );
   await safeAlter(
-    "ALTER TABLE submissions ADD COLUMN is_suspended TINYINT(1) NOT NULL DEFAULT 0 AFTER tab_switch_count"
+    "ALTER TABLE submissions ADD COLUMN is_suspended TINYINT(1) NOT NULL DEFAULT 0 AFTER unfocused_seconds"
   );
   await safeAlter(
     "ALTER TABLE submissions ADD COLUMN suspend_reason VARCHAR(255) DEFAULT NULL AFTER is_suspended"
@@ -683,8 +704,18 @@ async function ensureSchemaColumns() {
   await safeAlter(
     "ALTER TABLE exam_attempts ADD COLUMN tab_switch_count INT NOT NULL DEFAULT 0 AFTER suspend_reason"
   );
+  await ensureColumn(
+    "exam_attempts",
+    "unfocused_seconds",
+    "ALTER TABLE exam_attempts ADD COLUMN unfocused_seconds INT NOT NULL DEFAULT 0 AFTER tab_switch_count"
+  );
+  await ensureColumn(
+    "exam_attempts",
+    "draft_answers_json",
+    "ALTER TABLE exam_attempts ADD COLUMN draft_answers_json JSON DEFAULT NULL AFTER unfocused_seconds"
+  );
   await safeAlter(
-    "ALTER TABLE exam_attempts ADD COLUMN last_violation_at DATETIME DEFAULT NULL AFTER tab_switch_count"
+    "ALTER TABLE exam_attempts ADD COLUMN last_violation_at DATETIME DEFAULT NULL AFTER draft_answers_json"
   );
   await safeAlter(
     "ALTER TABLE exam_attempts ADD COLUMN last_violation_reason VARCHAR(255) DEFAULT NULL AFTER last_violation_at"

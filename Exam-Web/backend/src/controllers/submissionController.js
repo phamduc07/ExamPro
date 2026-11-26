@@ -1,6 +1,203 @@
 import { pool } from "../config/db.js";
 import { isId, isNumber } from "../utils/validation.js";
 
+const NETWORK_GRACE_SECONDS = 15;
+
+function sanitizeAnswersObject(rawAnswers, validQuestionIdSet = null) {
+  let parsed = rawAnswers;
+  if (typeof rawAnswers === "string") {
+    try {
+      parsed = JSON.parse(rawAnswers);
+    } catch {
+      return {};
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {};
+  }
+  const clean = {};
+  for (const [key, val] of Object.entries(parsed)) {
+    if (!["A", "B", "C", "D"].includes(val)) continue;
+    if (validQuestionIdSet && !validQuestionIdSet.has(String(key))) continue;
+    clean[String(key)] = val;
+  }
+  return clean;
+}
+
+function gradeAnswersAgainstQuestions(questions, answersObj) {
+  let correctCount = 0;
+  const totalQuestions = questions.length;
+  for (const q of questions) {
+    const choice = answersObj[q.id] || answersObj[String(q.id)];
+    if (choice && choice === q.correct_answer) {
+      correctCount++;
+    }
+  }
+  const score =
+    totalQuestions > 0
+      ? Number(((correctCount / totalQuestions) * 10).toFixed(2))
+      : 0;
+  return { correctCount, totalQuestions, score };
+}
+
+export async function isExamOfficiallyClosed(dbClient, exam) {
+  const isPublished = Boolean(Number(exam.is_published));
+  const nowMs = Date.now();
+  const closeAtMs = exam.close_at ? new Date(exam.close_at).getTime() : NaN;
+  const hasPassedCloseAt = Number.isFinite(closeAtMs) && closeAtMs <= nowMs;
+
+  if (isPublished && !hasPassedCloseAt) {
+    return false;
+  }
+
+  const sessionName = String(exam.exam_session || "").trim();
+  if (sessionName && exam.subject_id) {
+    const [openSiblings] = await dbClient.query(
+      `SELECT id, close_at
+       FROM exams
+       WHERE subject_id = ?
+         AND LOWER(TRIM(exam_session)) = LOWER(?)
+         AND is_published = 1`,
+      [Number(exam.subject_id), sessionName]
+    );
+    const anySiblingStillOpen = openSiblings.some((sib) => {
+      if (!sib.close_at) return true;
+      const sibCloseMs = new Date(sib.close_at).getTime();
+      return !Number.isFinite(sibCloseMs) || sibCloseMs > nowMs;
+    });
+    if (anySiblingStillOpen) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export async function syncExamProgress(req, res, next) {
+  try {
+    const examId = Number(req.params.id);
+    if (!isId(examId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Mã đề thi không hợp lệ.",
+      });
+    }
+
+    const rawAnswers = req.body?.answers ?? {};
+    if (
+      !rawAnswers ||
+      typeof rawAnswers !== "object" ||
+      Array.isArray(rawAnswers) ||
+      !Object.values(rawAnswers).every((ans) => ["A", "B", "C", "D"].includes(ans))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Danh sách đáp án tạm lưu không hợp lệ.",
+      });
+    }
+
+    const rawUnfocused =
+      req.body?.unfocused_seconds ?? req.body?.unfocusedSeconds ?? 0;
+    const safeUnfocused =
+      isNumber(rawUnfocused) && Number(rawUnfocused) >= 0
+        ? Math.floor(Number(rawUnfocused))
+        : 0;
+
+    const [exams] = await pool.query(
+      "SELECT id, duration_minutes, close_at, anti_cheat, max_tab_switches FROM exams WHERE id = ? LIMIT 1",
+      [examId]
+    );
+    if (!exams.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy đề thi.",
+      });
+    }
+
+    const [qRows] = await pool.query(
+      "SELECT question_id FROM exam_questions WHERE exam_id = ?",
+      [examId]
+    );
+    const validIds = new Set(qRows.map((r) => String(r.question_id)));
+    const cleanAnswers = sanitizeAnswersObject(rawAnswers, validIds);
+
+    const [attemptRows] = await pool.query(
+      `SELECT
+         started_at,
+         TIMESTAMPDIFF(SECOND, started_at, NOW()) AS elapsed_seconds,
+         status,
+         is_suspended,
+         tab_switch_count
+       FROM exam_attempts
+       WHERE exam_id = ? AND user_id = ?
+       LIMIT 1`,
+      [examId, req.user.id]
+    );
+
+    if (
+      !attemptRows.length ||
+      attemptRows[0].status !== "IN_PROGRESS" ||
+      Number(attemptRows[0].is_suspended) === 1
+    ) {
+      return res.status(200).json({
+        success: true,
+        data: { synced: false },
+      });
+    }
+
+    const maxDurationSec = (Number(exams[0].duration_minutes) || 30) * 60;
+    let effectiveAllowedSec = maxDurationSec;
+    if (exams[0].close_at && attemptRows[0].started_at) {
+      const closeLimitSec = Math.max(
+        1,
+        Math.floor(
+          (new Date(exams[0].close_at).getTime() -
+            new Date(attemptRows[0].started_at).getTime()) /
+            1000
+        )
+      );
+      effectiveAllowedSec = Math.min(maxDurationSec, closeLimitSec);
+    }
+
+    const elapsedSec = Math.max(0, Number(attemptRows[0].elapsed_seconds) || 0);
+    if (elapsedSec > effectiveAllowedSec + NETWORK_GRACE_SECONDS) {
+      return res.status(200).json({
+        success: true,
+        data: { synced: false, expired: true },
+      });
+    }
+
+    const isAntiCheat = Boolean(Number(exams[0].anti_cheat));
+    const maxAllowedTabs =
+      Number.isInteger(Number(exams[0].max_tab_switches)) &&
+      Number(exams[0].max_tab_switches) >= 1
+        ? Number(exams[0].max_tab_switches)
+        : 3;
+    if (isAntiCheat && Number(attemptRows[0].tab_switch_count) > maxAllowedTabs) {
+      return res.status(200).json({
+        success: true,
+        data: { synced: false, exceededViolations: true },
+      });
+    }
+
+    const clampedUnfocused = Math.min(maxDurationSec, safeUnfocused);
+    await pool.query(
+      `UPDATE exam_attempts
+       SET draft_answers_json = ?,
+           unfocused_seconds = GREATEST(unfocused_seconds, ?)
+       WHERE exam_id = ? AND user_id = ? AND status = 'IN_PROGRESS'`,
+      [JSON.stringify(cleanAnswers), clampedUnfocused, examId, req.user.id]
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: { synced: true },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function submitExam(req, res, next) {
   let connection;
   try {
@@ -12,6 +209,8 @@ export async function submitExam(req, res, next) {
       startedAt,
       tab_switch_count,
       tabSwitchCount,
+      unfocused_seconds,
+      unfocusedSeconds,
     } = req.body;
     if (!isId(examId)) {
       return res.status(400).json({
@@ -33,46 +232,57 @@ export async function submitExam(req, res, next) {
     }
     const safeTabSwitchCount = Number(rawTabSwitches);
 
-    if (!answers || typeof answers !== "object" || Array.isArray(answers) ||
-        !Object.values(answers).every((answer) => ["A", "B", "C", "D"].includes(answer))) {
-      return res.status(400).json({ success: false, message: "Danh sách đáp án không hợp lệ." });
+    const rawUnfocusedSeconds = unfocused_seconds ?? unfocusedSeconds ?? 0;
+    if (
+      !isNumber(rawUnfocusedSeconds) ||
+      !Number.isInteger(Number(rawUnfocusedSeconds)) ||
+      Number(rawUnfocusedSeconds) < 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Tổng thời gian mất focus không hợp lệ.",
+      });
     }
+    const safeUnfocusedSeconds = Number(rawUnfocusedSeconds);
+
+    if (
+      !answers ||
+      typeof answers !== "object" ||
+      Array.isArray(answers) ||
+      !Object.values(answers).every((answer) => ["A", "B", "C", "D"].includes(answer))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Danh sách đáp án không hợp lệ.",
+      });
+    }
+
     const [exams] = await pool.query(
-      "SELECT id, is_published, duration_minutes, major_group, open_at, close_at, max_attempts, anti_cheat FROM exams WHERE id = ?",
+      "SELECT id, is_published, duration_minutes, major_group, open_at, close_at, max_attempts, anti_cheat, max_tab_switches FROM exams WHERE id = ?",
       [Number(examId)]
     );
-    if (!exams.length) return res.status(404).json({ success: false, message: "Không tìm thấy đề thi." });
-    const isAntiCheatExam = Boolean(Number(exams[0].anti_cheat));
+    if (!exams.length) {
+      return res.status(404).json({ success: false, message: "Không tìm thấy đề thi." });
+    }
+    const exam = exams[0];
+    const isAntiCheatExam = Boolean(Number(exam.anti_cheat));
+    const maxDurationSec = (Number(exam.duration_minutes) || 30) * 60;
+
     if (req.user.role === "STUDENT") {
-      if (!exams[0].is_published) {
+      if (!exam.is_published) {
         return res.status(403).json({ success: false, message: "Đề thi này chưa được mở." });
       }
       const now = new Date();
-      if (exams[0].open_at && now < new Date(exams[0].open_at)) {
+      if (exam.open_at && now < new Date(exam.open_at)) {
         return res.status(403).json({ success: false, message: "Đề thi chưa đến thời gian mở." });
       }
-      if (exams[0].close_at && now.getTime() > new Date(exams[0].close_at).getTime() + 60000) {
-        return res.status(403).json({ success: false, message: "Đề thi đã hết thời gian đóng." });
-      }
-      if (Number(exams[0].max_attempts) >= 1) {
-        const [attemptRows] = await pool.query(
-          "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ? AND student_id = ?",
-          [Number(examId), req.user.id]
-        );
-        if (Number(attemptRows[0].cnt) >= Number(exams[0].max_attempts)) {
-          return res.status(403).json({
-            success: false,
-            message: `Bạn đã hết lượt làm bài (${exams[0].max_attempts} lượt) cho đề thi này.`,
-          });
-        }
-      }
-      if (exams[0].major_group && exams[0].major_group !== "ALL") {
+      if (exam.major_group && exam.major_group !== "ALL") {
         let studentMajor = req.user.majorGroup;
         if (!studentMajor) {
           const [uRows] = await pool.query("SELECT major_group FROM users WHERE id = ?", [req.user.id]);
           studentMajor = uRows[0]?.major_group || null;
         }
-        if (exams[0].major_group !== studentMajor) {
+        if (exam.major_group !== studentMajor) {
           return res.status(403).json({
             success: false,
             message: "Đề thi này không thuộc khối ngành của bạn.",
@@ -80,7 +290,13 @@ export async function submitExam(req, res, next) {
         }
       }
     }
-    if (!isNumber(timeSpentSeconds) || !Number.isInteger(Number(timeSpentSeconds)) || Number(timeSpentSeconds) < 0 || Number(timeSpentSeconds) > exams[0].duration_minutes * 60) {
+
+    if (
+      !isNumber(timeSpentSeconds) ||
+      !Number.isInteger(Number(timeSpentSeconds)) ||
+      Number(timeSpentSeconds) < 0 ||
+      Number(timeSpentSeconds) > maxDurationSec
+    ) {
       return res.status(400).json({ success: false, message: "Thời gian làm bài không hợp lệ." });
     }
 
@@ -103,21 +319,12 @@ export async function submitExam(req, res, next) {
 
     const questionIds = new Set(questions.map((q) => String(q.id)));
     if (Object.keys(answers).some((id) => !questionIds.has(id))) {
-      return res.status(400).json({ success: false, message: "Có đáp án cho câu hỏi không thuộc đề thi." });
+      return res.status(400).json({
+        success: false,
+        message: "Có đáp án cho câu hỏi không thuộc đề thi.",
+      });
     }
 
-    let correctCount = 0;
-    const totalQuestions = questions.length;
-
-    for (const q of questions) {
-      const studentChoice = answers[q.id] || answers[String(q.id)];
-      if (studentChoice && studentChoice === q.correct_answer) {
-        correctCount++;
-      }
-    }
-
-    const score = Number(((correctCount / totalQuestions) * 10).toFixed(2));
-    const maxDurationSec = Number(exams[0].duration_minutes) * 60;
     let safeTimeSpent = Number(timeSpentSeconds) || 0;
     const rawStartedAt = started_at ?? startedAt;
     let resolvedStartedAt = null;
@@ -126,7 +333,17 @@ export async function submitExam(req, res, next) {
     await connection.beginTransaction();
 
     const [attemptRows] = await connection.query(
-      `SELECT started_at, status, is_suspended, suspend_reason, tab_switch_count FROM exam_attempts
+      `SELECT
+         started_at,
+         TIMESTAMPDIFF(SECOND, started_at, NOW()) AS elapsed_seconds,
+         TIMESTAMPDIFF(SECOND, last_violation_at, NOW()) AS seconds_since_last_violation,
+         status,
+         is_suspended,
+         suspend_reason,
+         tab_switch_count,
+         unfocused_seconds,
+         draft_answers_json
+       FROM exam_attempts
        WHERE exam_id = ? AND user_id = ?
        FOR UPDATE`,
       [Number(examId), req.user.id]
@@ -145,73 +362,114 @@ export async function submitExam(req, res, next) {
 
     if (!attemptRows.length || attemptRows[0].status !== "IN_PROGRESS") {
       await connection.rollback();
+      if (
+        !attemptRows.length &&
+        req.user.role === "STUDENT" &&
+        exam.close_at &&
+        Date.now() > new Date(exam.close_at).getTime() + NETWORK_GRACE_SECONDS * 1000
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Đề thi đã hết thời gian đóng.",
+        });
+      }
       return res.status(409).json({
         success: false,
         message: !attemptRows.length
           ? "Bạn chưa bắt đầu lượt làm bài hợp lệ cho đề thi này."
-          : "Lượt làm bài này đã kết thúc hoặc đã được thu bài tự động.",
+          : "Bài thi đã được nộp hoặc đã tự động chốt điểm, từ chối ghi đè thêm.",
       });
     }
 
-    if (req.user.role === "STUDENT" && Number(exams[0].max_attempts) >= 1) {
+    if (req.user.role === "STUDENT" && Number(exam.max_attempts) >= 1) {
       const [attemptCountRows] = await connection.query(
         "SELECT COUNT(*) AS cnt FROM submissions WHERE exam_id = ? AND student_id = ?",
         [Number(examId), req.user.id]
       );
-      if (Number(attemptCountRows[0].cnt) >= Number(exams[0].max_attempts)) {
+      if (Number(attemptCountRows[0].cnt) >= Number(exam.max_attempts)) {
         await connection.rollback();
         return res.status(403).json({
           success: false,
-          message: `Bạn đã hết lượt làm bài (${exams[0].max_attempts} lượt) cho đề thi này.`,
+          message: `Bạn đã hết lượt làm bài (${exam.max_attempts} lượt) cho đề thi này.`,
         });
       }
     }
 
-    if (
-      attemptRows.length > 0 &&
-      attemptRows[0].status === "IN_PROGRESS" &&
-      attemptRows[0].started_at
-    ) {
-      const serverStarted = new Date(attemptRows[0].started_at);
-      if (!Number.isNaN(serverStarted.getTime())) {
-        const elapsedMs = Date.now() - serverStarted.getTime();
-        if (req.user.role === "STUDENT" && elapsedMs > (maxDurationSec + 30) * 1000) {
-          const expiredTabCount = isAntiCheatExam
-            ? Math.max(0, Number(attemptRows[0].tab_switch_count) || 0)
-            : 0;
-          await connection.query(
-            `INSERT INTO submissions
-              (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, answers_json)
-             VALUES (?, ?, 0, 0, ?, ?, ?, ?, '{}')`,
-            [
-              Number(examId),
-              req.user.id,
-              totalQuestions,
-              maxDurationSec,
-              serverStarted,
-              expiredTabCount,
-            ]
-          );
-          await connection.query(
-            "UPDATE exam_attempts SET status = 'COMPLETED' WHERE exam_id = ? AND user_id = ?",
-            [Number(examId), req.user.id]
-          );
-          await connection.commit();
-          return res.status(400).json({
-            success: false,
-            isExpired: true,
-            message: "Bài nộp bị từ chối do đã vượt quá thời gian làm bài cho phép (ghi nhận 0 điểm).",
-          });
-        }
-        resolvedStartedAt = serverStarted;
-        const actualTimeSpent = Math.max(
-          0,
-          Math.round(elapsedMs / 1000)
-        );
-        safeTimeSpent = Math.min(maxDurationSec, Math.max(safeTimeSpent, actualTimeSpent));
-      }
+    const activeAttempt = attemptRows[0];
+    const serverStarted = activeAttempt.started_at ? new Date(activeAttempt.started_at) : null;
+    const elapsedSeconds = Math.max(0, Number(activeAttempt.elapsed_seconds) || 0);
+
+    let effectiveAllowedSec = maxDurationSec;
+    if (exam.close_at && serverStarted && !Number.isNaN(serverStarted.getTime())) {
+      const closeLimitSec = Math.max(
+        1,
+        Math.floor((new Date(exam.close_at).getTime() - serverStarted.getTime()) / 1000)
+      );
+      effectiveAllowedSec = Math.min(maxDurationSec, closeLimitSec);
     }
 
+    if (
+      req.user.role === "STUDENT" &&
+      elapsedSeconds > effectiveAllowedSec + NETWORK_GRACE_SECONDS
+    ) {
+      const savedDraftAnswers = sanitizeAnswersObject(
+        activeAttempt.draft_answers_json,
+        questionIds
+      );
+      const {
+        correctCount: draftCorrect,
+        totalQuestions: draftTotal,
+        score: draftScore,
+      } = gradeAnswersAgainstQuestions(questions, savedDraftAnswers);
+
+      const expiredTabCount = isAntiCheatExam
+        ? Math.max(0, Number(activeAttempt.tab_switch_count) || 0)
+        : 0;
+      const expiredUnfocused = Math.min(
+        maxDurationSec,
+        Math.max(0, Number(activeAttempt.unfocused_seconds) || 0)
+      );
+
+      const [expiredInsert] = await connection.query(
+        `INSERT INTO submissions
+          (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, answers_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          Number(examId),
+          req.user.id,
+          draftScore,
+          draftCorrect,
+          draftTotal,
+          effectiveAllowedSec,
+          serverStarted || new Date(),
+          expiredTabCount,
+          expiredUnfocused,
+          JSON.stringify(savedDraftAnswers),
+        ]
+      );
+      await connection.query(
+        "UPDATE exam_attempts SET status = 'COMPLETED' WHERE exam_id = ? AND user_id = ?",
+        [Number(examId), req.user.id]
+      );
+      await connection.commit();
+      return res.status(400).json({
+        success: false,
+        isExpired: true,
+        message:
+          "Đã vượt quá thời gian làm bài cho phép (tối đa 15 giây trễ mạng). Hệ thống từ chối ghi đè thêm và đã tự động chốt điểm theo đáp án lưu gần nhất.",
+        data: {
+          submissionId: expiredInsert.insertId,
+          score: draftScore,
+          correctCount: draftCorrect,
+          totalQuestions: draftTotal,
+        },
+      });
+    }
+
+    if (serverStarted && !Number.isNaN(serverStarted.getTime())) {
+      resolvedStartedAt = serverStarted;
+      safeTimeSpent = Math.min(maxDurationSec, Math.max(safeTimeSpent, elapsedSeconds));
+    }
     if (!resolvedStartedAt && rawStartedAt) {
       const parsedDate = new Date(rawStartedAt);
       if (!Number.isNaN(parsedDate.getTime())) {
@@ -222,15 +480,45 @@ export async function submitExam(req, res, next) {
       resolvedStartedAt = new Date(Date.now() - safeTimeSpent * 1000);
     }
 
-    const serverTabSwitchCount =
-      isAntiCheatExam && attemptRows.length > 0
-        ? Math.max(0, Number(attemptRows[0].tab_switch_count) || 0)
-        : 0;
+    const incomingCleanAnswers = sanitizeAnswersObject(answers, questionIds);
+    const savedDraftAnswers = sanitizeAnswersObject(
+      activeAttempt.draft_answers_json,
+      questionIds
+    );
+    const maxAllowedTabs =
+      Number.isInteger(Number(exam.max_tab_switches)) && Number(exam.max_tab_switches) >= 1
+        ? Number(exam.max_tab_switches)
+        : 3;
+    const delayedAfterViolationLimit =
+      isAntiCheatExam &&
+      Number(activeAttempt.tab_switch_count) > maxAllowedTabs &&
+      Number(activeAttempt.seconds_since_last_violation) > NETWORK_GRACE_SECONDS &&
+      Object.keys(savedDraftAnswers).length > 0;
+
+    const finalAnswersToGrade = delayedAfterViolationLimit
+      ? savedDraftAnswers
+      : Object.keys(incomingCleanAnswers).length > 0
+      ? incomingCleanAnswers
+      : savedDraftAnswers;
+
+    const { correctCount, totalQuestions, score } = gradeAnswersAgainstQuestions(
+      questions,
+      finalAnswersToGrade
+    );
+
+    const finalTabSwitchCount = isAntiCheatExam
+      ? Math.max(safeTabSwitchCount, Number(activeAttempt.tab_switch_count) || 0)
+      : 0;
+    const finalUnfocusedSeconds = Math.min(
+      maxDurationSec,
+      Math.max(safeUnfocusedSeconds, Number(activeAttempt.unfocused_seconds) || 0)
+    );
+    const serializedAnswers = JSON.stringify(finalAnswersToGrade);
 
     const [result] = await connection.query(
       `INSERT INTO submissions
-        (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, answers_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, answers_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         Number(examId),
         req.user.id,
@@ -239,16 +527,26 @@ export async function submitExam(req, res, next) {
         totalQuestions,
         safeTimeSpent,
         resolvedStartedAt,
-        serverTabSwitchCount,
-        JSON.stringify(answers),
+        finalTabSwitchCount,
+        finalUnfocusedSeconds,
+        serializedAnswers,
       ]
     );
 
     await connection.query(
-      `INSERT INTO exam_attempts (exam_id, user_id, started_at, status)
-       VALUES (?, ?, ?, 'COMPLETED')
-       ON DUPLICATE KEY UPDATE status = 'COMPLETED'`,
-      [Number(examId), req.user.id, resolvedStartedAt]
+      `UPDATE exam_attempts
+       SET status = 'COMPLETED',
+           tab_switch_count = ?,
+           unfocused_seconds = ?,
+           draft_answers_json = ?
+       WHERE exam_id = ? AND user_id = ?`,
+      [
+        finalTabSwitchCount,
+        finalUnfocusedSeconds,
+        serializedAnswers,
+        Number(examId),
+        req.user.id,
+      ]
     );
 
     await connection.commit();
@@ -285,6 +583,7 @@ export async function getMySubmissions(req, res, next) {
         sub.time_spent_seconds,
         sub.started_at,
         sub.tab_switch_count,
+        sub.unfocused_seconds,
         sub.is_suspended,
         sub.suspend_reason,
         sub.submitted_at,
@@ -292,6 +591,9 @@ export async function getMySubmissions(req, res, next) {
         e.duration_minutes,
         e.pass_score,
         e.subject_id,
+        e.is_published,
+        e.close_at,
+        e.exam_session,
         e.anti_cheat,
         s.name AS subject_name,
         s.code AS subject_code
@@ -304,9 +606,20 @@ export async function getMySubmissions(req, res, next) {
       [req.user.id]
     );
 
+    const formatted = await Promise.all(
+      rows.map(async (row) => {
+        const examClosed = await isExamOfficiallyClosed(pool, row);
+        return {
+          ...row,
+          exam_closed: examClosed,
+          can_view_answers: examClosed,
+        };
+      })
+    );
+
     return res.status(200).json({
       success: true,
-      data: rows,
+      data: formatted,
     });
   } catch (error) {
     next(error);
@@ -322,10 +635,13 @@ export async function getSubmissionDetail(req, res, next) {
       SELECT
         sub.*,
         e.title AS exam_title,
+        e.subject_id,
         e.duration_minutes,
         e.pass_score,
         e.is_published,
+        e.open_at,
         e.close_at,
+        e.exam_session,
         e.max_attempts,
         e.shuffle_options,
         e.anti_cheat,
@@ -359,14 +675,17 @@ export async function getSubmissionDetail(req, res, next) {
       });
     }
 
+    const isStudent = req.user.role === "STUDENT";
     const isAntiCheatExam = Boolean(Number(submission.anti_cheat));
+    const examClosed = await isExamOfficiallyClosed(pool, submission);
+    const canViewAnswers = !isStudent || examClosed;
     const isSuspended =
       Number(submission.is_suspended) === 1 || Boolean(submission.suspend_reason);
     const passed =
       !isSuspended && Number(submission.score) >= Number(submission.pass_score ?? 5);
     const { answers_json, ...summarySubmission } = submission;
 
-    if (isAntiCheatExam) {
+    if (isStudent && !canViewAnswers && isAntiCheatExam) {
       return res.status(200).json({
         success: true,
         data: {
@@ -375,6 +694,7 @@ export async function getSubmissionDetail(req, res, next) {
           passed,
           is_passed: passed,
           is_suspended: isSuspended ? 1 : 0,
+          exam_closed: false,
           hideDetails: true,
           can_view_answers: false,
           questions: [],
@@ -403,16 +723,35 @@ export async function getSubmissionDetail(req, res, next) {
       [submission.exam_id]
     );
 
-    const parsedAnswers =
-      typeof answers_json === "string"
-        ? JSON.parse(answers_json || "{}")
-        : answers_json || {};
+    const parsedAnswers = sanitizeAnswersObject(answers_json);
 
     const detailedQuestions = questions.map((q) => {
       const selectedOption = parsedAnswers[q.id] || parsedAnswers[String(q.id)] || null;
+      if (!canViewAnswers) {
+        return {
+          id: q.id,
+          content: q.content,
+          option_a: q.option_a,
+          option_b: q.option_b,
+          option_c: q.option_c,
+          option_d: q.option_d,
+          difficulty: q.difficulty,
+          order_index: q.order_index,
+          selected_option: selectedOption,
+        };
+      }
       const isCorrect = selectedOption === q.correct_answer;
       return {
-        ...q,
+        id: q.id,
+        content: q.content,
+        option_a: q.option_a,
+        option_b: q.option_b,
+        option_c: q.option_c,
+        option_d: q.option_d,
+        correct_answer: q.correct_answer,
+        difficulty: q.difficulty,
+        explanation: q.explanation,
+        order_index: q.order_index,
         selected_option: selectedOption,
         is_correct: isCorrect,
       };
@@ -422,12 +761,13 @@ export async function getSubmissionDetail(req, res, next) {
       success: true,
       data: {
         ...summarySubmission,
-        anti_cheat: 0,
+        anti_cheat: isAntiCheatExam ? 1 : 0,
         passed,
         is_passed: passed,
         is_suspended: isSuspended ? 1 : 0,
+        exam_closed: examClosed,
         hideDetails: false,
-        can_view_answers: true,
+        can_view_answers: canViewAnswers,
         questions: detailedQuestions,
       },
     });
@@ -510,6 +850,8 @@ export async function deleteSubmission(req, res, next) {
          SET is_suspended = 0,
              suspend_reason = NULL,
              tab_switch_count = 0,
+             unfocused_seconds = 0,
+             draft_answers_json = NULL,
              last_violation_at = NULL,
              last_violation_reason = NULL
          WHERE exam_id = ? AND user_id = ?`,
@@ -583,7 +925,7 @@ export async function suspendSubmission(req, res, next) {
     const student = userRows[0];
 
     const [attemptRows] = await connection.query(
-      "SELECT started_at, status, tab_switch_count FROM exam_attempts WHERE exam_id = ? AND user_id = ? FOR UPDATE",
+      "SELECT started_at, status, tab_switch_count, unfocused_seconds, draft_answers_json FROM exam_attempts WHERE exam_id = ? AND user_id = ? FOR UPDATE",
       [Number(examId), Number(userId)]
     );
     const wasInProgress =
@@ -594,6 +936,13 @@ export async function suspendSubmission(req, res, next) {
     const attemptTabSwitches = Math.max(
       0,
       Number(attemptRows[0]?.tab_switch_count) || 0
+    );
+    const attemptUnfocused = Math.max(
+      0,
+      Number(attemptRows[0]?.unfocused_seconds) || 0
+    );
+    const attemptDraftAnswers = sanitizeAnswersObject(
+      attemptRows[0]?.draft_answers_json
     );
 
     await connection.query(
@@ -636,8 +985,8 @@ export async function suspendSubmission(req, res, next) {
         : 0;
       await connection.query(
         `INSERT INTO submissions
-          (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, is_suspended, suspend_reason, answers_json)
-         VALUES (?, ?, 0, 0, ?, ?, ?, ?, 1, ?, '{}')`,
+          (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, is_suspended, suspend_reason, answers_json)
+         VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, 1, ?, ?)`,
         [
           Number(examId),
           Number(userId),
@@ -645,7 +994,9 @@ export async function suspendSubmission(req, res, next) {
           timeSpentSec,
           attemptStartedAt,
           attemptTabSwitches,
+          Math.min(maxDurationSec, attemptUnfocused),
           cleanReason,
+          JSON.stringify(attemptDraftAnswers),
         ]
       );
     }
@@ -731,6 +1082,8 @@ export async function unsuspendSubmission(req, res, next) {
        SET is_suspended = 0,
            suspend_reason = NULL,
            tab_switch_count = 0,
+           unfocused_seconds = 0,
+           draft_answers_json = NULL,
            last_violation_at = NULL,
            last_violation_reason = NULL,
            status = 'COMPLETED'
@@ -818,7 +1171,15 @@ export async function recordExamViolation(req, res, next) {
     const hasTabLimit = true;
 
     const [existingAttempt] = await connection.query(
-      `SELECT started_at, status, is_suspended, suspend_reason, tab_switch_count
+      `SELECT
+         started_at,
+         TIMESTAMPDIFF(SECOND, started_at, NOW()) AS elapsed_seconds,
+         status,
+         is_suspended,
+         suspend_reason,
+         tab_switch_count,
+         unfocused_seconds,
+         draft_answers_json
        FROM exam_attempts
        WHERE exam_id = ? AND user_id = ?
        FOR UPDATE`,
@@ -857,20 +1218,51 @@ export async function recordExamViolation(req, res, next) {
       });
     }
 
-    const nowDate = new Date();
+    const maxDurationSec = (Number(exams[0].duration_minutes) || 30) * 60;
+    const rawUnfocused =
+      req.body?.unfocused_seconds ?? req.body?.unfocusedSeconds ?? 0;
+    const safeUnfocused =
+      isNumber(rawUnfocused) && Number(rawUnfocused) >= 0
+        ? Math.min(maxDurationSec, Math.floor(Number(rawUnfocused)))
+        : 0;
+
+    let mergedDraftJson = existingAttempt[0]?.draft_answers_json ?? null;
+    const elapsedSec = Math.max(0, Number(existingAttempt[0]?.elapsed_seconds) || 0);
+    if (
+      req.body?.answers &&
+      typeof req.body.answers === "object" &&
+      !Array.isArray(req.body.answers) &&
+      elapsedSec <= maxDurationSec + NETWORK_GRACE_SECONDS
+    ) {
+      const [qRows] = await connection.query(
+        "SELECT question_id FROM exam_questions WHERE exam_id = ?",
+        [examId]
+      );
+      const validIds = new Set(qRows.map((r) => String(r.question_id)));
+      const prevDraft = sanitizeAnswersObject(mergedDraftJson, validIds);
+      const nextDraft = sanitizeAnswersObject(req.body.answers, validIds);
+      const combined =
+        Object.keys(nextDraft).length > 0 ? nextDraft : prevDraft;
+      mergedDraftJson = JSON.stringify(combined);
+    } else if (mergedDraftJson && typeof mergedDraftJson === "object") {
+      mergedDraftJson = JSON.stringify(mergedDraftJson);
+    }
+
     await connection.query(
       `INSERT INTO exam_attempts
-        (exam_id, user_id, started_at, status, tab_switch_count, last_violation_at, last_violation_reason)
-       VALUES (?, ?, ?, 'IN_PROGRESS', 1, ?, ?)
+        (exam_id, user_id, started_at, status, tab_switch_count, unfocused_seconds, draft_answers_json, last_violation_at, last_violation_reason)
+       VALUES (?, ?, NOW(), 'IN_PROGRESS', 1, ?, ?, NOW(), ?)
        ON DUPLICATE KEY UPDATE
          tab_switch_count = tab_switch_count + 1,
-         last_violation_at = VALUES(last_violation_at),
+         unfocused_seconds = GREATEST(unfocused_seconds, VALUES(unfocused_seconds)),
+         draft_answers_json = COALESCE(VALUES(draft_answers_json), draft_answers_json),
+         last_violation_at = NOW(),
          last_violation_reason = VALUES(last_violation_reason)`,
-      [examId, req.user.id, nowDate, nowDate, reason]
+      [examId, req.user.id, safeUnfocused, mergedDraftJson, reason]
     );
 
     const [attemptRows] = await connection.query(
-      `SELECT started_at, tab_switch_count, is_suspended, suspend_reason, status
+      `SELECT tab_switch_count
        FROM exam_attempts
        WHERE exam_id = ? AND user_id = ?
        FOR UPDATE`,
@@ -882,40 +1274,6 @@ export async function recordExamViolation(req, res, next) {
       Number(attemptRows[0]?.tab_switch_count) || 0
     );
     const forceSubmit = hasTabLimit && tabSwitchCount > maxAllowed;
-    let autoSubmissionId = null;
-
-    if (forceSubmit) {
-      const attemptStartedAt = attemptRows[0]?.started_at
-        ? new Date(attemptRows[0].started_at)
-        : nowDate;
-      const maxDurationSec = (Number(exams[0].duration_minutes) || 30) * 60;
-      const timeSpentSec = Math.min(
-        maxDurationSec,
-        Math.max(0, Math.round((Date.now() - attemptStartedAt.getTime()) / 1000))
-      );
-      const autoReason = `Vượt quá giới hạn rời tab cho phép (${tabSwitchCount}/${maxAllowed} lần)`;
-
-      const [insertRes] = await connection.query(
-        `INSERT INTO submissions
-          (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, is_suspended, suspend_reason, answers_json)
-         VALUES (?, ?, 0, 0, ?, ?, ?, ?, 1, ?, '{}')`,
-        [
-          examId,
-          req.user.id,
-          Number(exams[0].total_questions) || 0,
-          timeSpentSec,
-          attemptStartedAt,
-          tabSwitchCount,
-          autoReason,
-        ]
-      );
-      autoSubmissionId = insertRes.insertId;
-
-      await connection.query(
-        "UPDATE exam_attempts SET status = 'COMPLETED', is_suspended = 1, suspend_reason = ? WHERE exam_id = ? AND user_id = ?",
-        [autoReason, examId, req.user.id]
-      );
-    }
 
     await connection.commit();
     return res.status(200).json({
@@ -925,7 +1283,7 @@ export async function recordExamViolation(req, res, next) {
         tabSwitchCount,
         maxTabSwitches: maxAllowed,
         forceSubmit,
-        submissionId: autoSubmissionId,
+        submissionId: null,
       },
     });
   } catch (error) {

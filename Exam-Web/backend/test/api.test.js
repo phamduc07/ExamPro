@@ -226,22 +226,48 @@ test("Sửa đề hợp lệ; lọc đề theo khối ngành (KY_THUAT / KINH_TE
   assert.equal(detail.body.data.questions[0].explanation, undefined);
 });
 
-test("Chấm điểm ở server; từ chối đáp án lạ, câu ngoài đề và thời gian âm", async () => {
+test("Chấm điểm ở server; khóa đáp án khi đề đang mở và mở khóa khi đề đóng; lưu thời gian mất focus", async () => {
   for (const change of [{ answers: null }, { answers: [] }, { answers: { [questionId]: "X" } }, { answers: { 999999: "A" } }, { timeSpentSeconds: -1 }, { timeSpentSeconds: 301 }, { timeSpentSeconds: [] }]) {
     assert.equal((await request("/submissions", { method: "POST", token: studentToken, body: { examId, ...change } })).status, 400);
   }
-  const result = await request("/submissions", { method: "POST", token: studentToken, body: { examId, answers: { [questionId]: "A" }, timeSpentSeconds: 10, score: 0 } });
+  const result = await request("/submissions", {
+    method: "POST",
+    token: studentToken,
+    body: { examId, answers: { [questionId]: "A" }, timeSpentSeconds: 10, unfocused_seconds: 7, score: 0 },
+  });
   assert.equal(result.status, 201);
   assert.equal(result.body.data.score, 10);
-  const detail = await request(`/submissions/${result.body.data.submissionId}`, { token: studentToken });
-  assert.equal(detail.body.data.questions[0].is_correct, true);
+
+  const openDetailStudent = await request(`/submissions/${result.body.data.submissionId}`, { token: studentToken });
+  assert.equal(openDetailStudent.status, 200);
+  assert.equal(openDetailStudent.body.data.can_view_answers, false);
+  assert.equal(openDetailStudent.body.data.questions[0].correct_answer, undefined);
+  assert.equal(openDetailStudent.body.data.questions[0].correct_option, undefined);
+  assert.equal(openDetailStudent.body.data.questions[0].is_correct, undefined);
+  assert.equal(openDetailStudent.body.data.questions[0].explanation, undefined);
+
+  const openDetailTeacher = await request(`/submissions/${result.body.data.submissionId}`, { token: teacherToken });
+  assert.equal(openDetailTeacher.status, 200);
+  assert.equal(openDetailTeacher.body.data.can_view_answers, true);
+  assert.equal(openDetailTeacher.body.data.unfocused_seconds, 7);
+  assert.equal(openDetailTeacher.body.data.questions[0].is_correct, true);
+
   const other = await request("/auth/login", { method: "POST", body: { email: "giang.lth@ptit.edu.vn", password: "123456" } });
   assert.equal((await request(`/submissions/${result.body.data.submissionId}`, { token: other.body.data.token })).status, 403);
 });
 
-test("Giữ lịch sử: cho phép sửa metadata đề & sửa câu hỏi tự chấm lại điểm, vẫn cấm xóa đề/câu hỏi/môn đã có dữ liệu", async () => {
+test("Giữ lịch sử: cho phép sửa metadata đề & sửa câu hỏi tự chấm lại điểm, mở khóa đáp án sau khi đóng đề", async () => {
+  const mySubs = await request("/submissions/my-history", { token: studentToken });
+  const subId = mySubs.body.data.find((s) => s.exam_id === examId).id;
   const updateExamRes = await request(`/exams/${examId}`, { method: "PUT", token: teacherToken, body: examForm() });
   assert.equal(updateExamRes.status, 200);
+
+  const closedDetailStudent = await request(`/submissions/${subId}`, { token: studentToken });
+  assert.equal(closedDetailStudent.status, 200);
+  assert.equal(closedDetailStudent.body.data.can_view_answers, true);
+  assert.equal(closedDetailStudent.body.data.questions[0].is_correct, true);
+  assert.equal(closedDetailStudent.body.data.questions[0].correct_answer, "A");
+
   assert.equal((await request(`/exams/${examId}`, { method: "DELETE", token: teacherToken })).status, 409);
   assert.equal((await request(`/questions/${questionId}`, { method: "DELETE", token: teacherToken })).status, 409);
   const updateQuestionRes = await request(`/questions/${questionId}`, {
@@ -262,4 +288,63 @@ test("Giữ lịch sử: cho phép sửa metadata đề & sửa câu hỏi tự 
   assert.equal(updateQuestionRes.body.data.regradedSubmissionsCount, 1);
   assert.equal((await request(`/subjects/${subjectId}`, { method: "DELETE", token: teacherToken })).status, 409);
   assert.equal((await request(`/subjects/${subjectId}`, { method: "PUT", token: teacherToken, body: { code: "NEW", name: "Tên mới" } })).status, 409);
+});
+
+test("Đối chiếu thời gian thực tế (+15s trễ mạng), chốt điểm theo đáp án lưu gần nhất và Rate Limit nộp bài", async () => {
+  const exRes = await request("/exams", {
+    method: "POST",
+    token: teacherToken,
+    body: { ...examForm(), title: "Đề kiểm tra timeout & rate limit", isPublished: 1, antiCheat: 1, maxTabSwitches: 1 },
+  });
+  assert.equal(exRes.status, 201);
+  const timedExamId = exRes.body.data.id;
+
+  const otherLogin = await request("/auth/login", {
+    method: "POST",
+    body: { email: "giang.lth@ptit.edu.vn", password: "123456" },
+  });
+  const secondStudentToken = otherLogin.body.data.token;
+
+  assert.equal((await request(`/exams/${timedExamId}?mode=take`, { token: secondStudentToken })).status, 200);
+  const syncRes = await request(`/exams/${timedExamId}/progress`, {
+    method: "PUT",
+    token: secondStudentToken,
+    body: { answers: { [questionId]: "A" }, unfocused_seconds: 12 },
+  });
+  assert.equal(syncRes.status, 200);
+
+  await pool.query(
+    "UPDATE exam_attempts SET started_at = DATE_SUB(NOW(), INTERVAL 320 SECOND) WHERE exam_id = ? AND user_id = (SELECT id FROM users WHERE email = 'giang.lth@ptit.edu.vn')",
+    [timedExamId]
+  );
+
+  const lateSub = await request("/submissions", {
+    method: "POST",
+    token: secondStudentToken,
+    body: { examId: timedExamId, answers: { [questionId]: "B" }, timeSpentSeconds: 300, unfocused_seconds: 20 },
+  });
+  assert.equal(lateSub.status, 400);
+  assert.equal(lateSub.body.isExpired, true);
+  assert.equal(lateSub.body.data.score, 10);
+
+  const overwriteSub = await request("/submissions", {
+    method: "POST",
+    token: secondStudentToken,
+    body: { examId: timedExamId, answers: { [questionId]: "C" }, timeSpentSeconds: 300 },
+  });
+  assert.equal(overwriteSub.status, 409);
+
+  let hitRateLimit = false;
+  for (let i = 0; i < 16; i++) {
+    const r = await request("/submissions", {
+      method: "POST",
+      token: secondStudentToken,
+      body: { examId: timedExamId, answers: {} },
+    });
+    if (r.status === 429) {
+      hitRateLimit = true;
+      break;
+    }
+  }
+  assert.equal(hitRateLimit, true);
 });

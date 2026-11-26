@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
 import { useAuth } from "../../context/AuthContext";
+import PreExamChecklistModal from "../../components/exam/PreExamChecklistModal";
 
 export default function ExamDetailPage() {
   const { id } = useParams();
@@ -12,6 +13,7 @@ export default function ExamDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [agreed, setAgreed] = useState(true);
+  const [showChecklistModal, setShowChecklistModal] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -159,25 +161,36 @@ export default function ExamDetailPage() {
               type="button"
               className="btn-start-exam"
               disabled={!agreed || questionCount === 0}
-              onClick={() => {
-                if (Boolean(Number(exam?.anti_cheat)) && !document.fullscreenElement) {
-                  const el = document.documentElement;
-                  const reqFs =
-                    el.requestFullscreen ||
-                    el.webkitRequestFullscreen ||
-                    el.msRequestFullscreen;
-                  if (reqFs) {
-                    Promise.resolve(reqFs.call(el)).catch(() => {});
-                  }
-                }
-                navigate(`/exam-room/${exam.id}`);
-              }}
+              onClick={() => setShowChecklistModal(true)}
             >
               🚀 Bắt đầu làm bài ngay ({exam.duration_minutes} phút)
             </button>
           </div>
         </div>
       </div>
+
+      <PreExamChecklistModal
+        open={showChecklistModal}
+        exam={exam}
+        onClose={() => setShowChecklistModal(false)}
+        onConfirmStart={() => {
+          setShowChecklistModal(false);
+          try {
+            sessionStorage.setItem(`ptit_pre_exam_checked_${exam.id}`, "1");
+          } catch {}
+          if (!document.fullscreenElement) {
+            const el = document.documentElement;
+            const reqFs =
+              el.requestFullscreen ||
+              el.webkitRequestFullscreen ||
+              el.msRequestFullscreen;
+            if (reqFs) {
+              Promise.resolve(reqFs.call(el)).catch(() => {});
+            }
+          }
+          navigate(`/exam-room/${exam.id}`);
+        }}
+      />
     </div>
   );
 }

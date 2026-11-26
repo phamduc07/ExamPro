@@ -50,6 +50,7 @@ import {
 } from "../controllers/examController.js";
 import {
   submitExam,
+  syncExamProgress,
   getMySubmissions,
   getSubmissionDetail,
   getAllSubmissions,
@@ -106,6 +107,48 @@ const chatLimiter = rateLimit({
   },
 });
 
+const examFetchLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 40,
+  keyGenerator: (req) =>
+    req.user?.id ? `exam_fetch_user_${req.user.id}` : `exam_fetch_ip_${req.ip || "unknown"}`,
+  validate: false,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Bạn đang tải đề thi quá nhanh. Vui lòng đợi ít giây rồi thử lại.",
+  },
+});
+
+const examSubmitLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 15,
+  keyGenerator: (req) =>
+    req.user?.id ? `exam_submit_user_${req.user.id}` : `exam_submit_ip_${req.ip || "unknown"}`,
+  validate: false,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Bạn gửi yêu cầu nộp bài quá nhiều lần liên tiếp. Vui lòng thử lại sau ít giây.",
+  },
+});
+
+const examProgressLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  keyGenerator: (req) =>
+    req.user?.id ? `exam_prog_user_${req.user.id}` : `exam_prog_ip_${req.ip || "unknown"}`,
+  validate: false,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Tần suất đồng bộ bài làm vượt giới hạn tạm thời.",
+  },
+});
+
 router.post("/auth/register/send-otp", authLimiter, sendRegisterOtp);
 router.post("/auth/send-otp", authLimiter, sendRegisterOtp);
 router.post("/auth/register", authLimiter, register);
@@ -141,19 +184,20 @@ router.post("/questions/bulk", verifyToken, requireRole("TEACHER"), bulkCreateQu
 router.put("/questions/:id", verifyToken, requireRole("TEACHER"), updateQuestion);
 router.delete("/questions/:id", verifyToken, requireRole("TEACHER"), deleteQuestion);
 
-router.get("/exams", verifyToken, getExams);
+router.get("/exams", verifyToken, examFetchLimiter, getExams);
 router.get("/exams/admin-overview", verifyToken, requireRole("TEACHER"), getAdminExamOverview);
 router.get("/exams/admin-logs", verifyToken, requireRole("TEACHER"), getAdminLogs);
 router.get("/exams/:id/leaderboard", verifyToken, requireRole("TEACHER"), getExamLeaderboard);
 router.get("/exams/:id/attempt-status", verifyToken, requireRole("STUDENT"), getExamAttemptStatus);
-router.get("/exams/:id", verifyToken, getExamById);
+router.put("/exams/:id/progress", verifyToken, requireRole("STUDENT"), examProgressLimiter, syncExamProgress);
+router.get("/exams/:id", verifyToken, examFetchLimiter, getExamById);
 router.post("/exams/:id/violation", verifyToken, requireRole("STUDENT"), recordExamViolation);
 router.post("/exams", verifyToken, requireRole("TEACHER"), createExam);
 router.put("/exams/:id", verifyToken, requireRole("TEACHER"), updateExam);
 router.patch("/exams/:id/reopen", verifyToken, requireRole("TEACHER"), reopenExam);
 router.delete("/exams/:id", verifyToken, requireRole("TEACHER"), deleteExam);
 
-router.post("/submissions", verifyToken, requireRole("STUDENT"), submitExam);
+router.post("/submissions", verifyToken, requireRole("STUDENT"), examSubmitLimiter, submitExam);
 router.post("/submissions/suspend", verifyToken, requireRole("TEACHER"), suspendSubmission);
 router.post("/submissions/unsuspend", verifyToken, requireRole("TEACHER"), unsuspendSubmission);
 router.get("/submissions/my-history", verifyToken, getMySubmissions);

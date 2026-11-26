@@ -127,6 +127,12 @@ export async function deleteSubject(req, res, next) {
 
 export async function getQuestions(req, res, next) {
   try {
+    if (req.user?.role === "STUDENT") {
+      return res.status(403).json({
+        success: false,
+        message: "Sinh viên không có quyền truy cập ngân hàng câu hỏi.",
+      });
+    }
     const { subjectId, difficulty, search } = req.query;
     let sql = `
       SELECT

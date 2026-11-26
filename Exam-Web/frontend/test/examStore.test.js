@@ -43,3 +43,19 @@ test("Đổi tài khoản hoặc nộp bài không giữ lại đáp án cũ", (
   assert.equal(useExamStore.getState().activeExam, null);
   assert.equal(JSON.parse(sessionStorage.getItem("ptit_exam_session")).state.deadline, 0);
 });
+
+test("Lưu cộng dồn thời gian mất focus và khôi phục đáp án nháp từ server", () => {
+  const examWithDraft = {
+    id: 9,
+    duration_minutes: 10,
+    remaining_seconds: 540,
+    current_unfocused_seconds: 5,
+    draft_answers: { 10: "C" },
+    questions: [{ id: 10, content: "Câu 1" }],
+  };
+  useExamStore.getState().startExamSession(examWithDraft, 7);
+  assert.equal(useExamStore.getState().answers[10], "C");
+  assert.equal(useExamStore.getState().unfocusedMs, 5000);
+  useExamStore.getState().addUnfocusedMs(2500);
+  assert.equal(useExamStore.getState().unfocusedMs, 7500);
+});

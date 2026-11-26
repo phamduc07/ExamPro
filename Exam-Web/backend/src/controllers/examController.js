@@ -28,6 +28,27 @@ function shuffleArray(list) {
   return arr;
 }
 
+function parseSafeDraftAnswers(rawDraft, validQuestionIdSet = null) {
+  let parsed = rawDraft;
+  if (typeof rawDraft === "string") {
+    try {
+      parsed = JSON.parse(rawDraft);
+    } catch {
+      return {};
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {};
+  }
+  const clean = {};
+  for (const [key, val] of Object.entries(parsed)) {
+    if (!["A", "B", "C", "D"].includes(val)) continue;
+    if (validQuestionIdSet && !validQuestionIdSet.has(String(key))) continue;
+    clean[String(key)] = val;
+  }
+  return clean;
+}
+
 async function resolveStudentMajorGroup(user) {
   if (!user || user.role !== "STUDENT") return null;
   if (user.majorGroup) return user.majorGroup;
@@ -172,7 +193,18 @@ export async function getExamById(req, res, next) {
       }
 
       const [existingAttempt] = await pool.query(
-        "SELECT started_at, status, is_suspended, suspend_reason FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
+        `SELECT
+           started_at,
+           TIMESTAMPDIFF(SECOND, started_at, NOW()) AS elapsed_seconds,
+           status,
+           is_suspended,
+           suspend_reason,
+           tab_switch_count,
+           unfocused_seconds,
+           draft_answers_json
+         FROM exam_attempts
+         WHERE exam_id = ? AND user_id = ?
+         LIMIT 1`,
         [id, req.user.id]
       );
 
@@ -209,26 +241,61 @@ export async function getExamById(req, res, next) {
         existingAttempt[0].status === "IN_PROGRESS" &&
         existingAttempt[0].started_at
       ) {
-        const prevStartedMs = new Date(existingAttempt[0].started_at).getTime();
         const maxDurationSec = (Number(exam.duration_minutes) || 30) * 60;
-        if (
-          Number.isFinite(prevStartedMs) &&
-          Date.now() > prevStartedMs + (maxDurationSec + 30) * 1000
-        ) {
-          const [qCntRows] = await pool.query(
-            "SELECT COUNT(*) AS cnt FROM exam_questions WHERE exam_id = ?",
+        const elapsedSec = Math.max(0, Number(existingAttempt[0].elapsed_seconds) || 0);
+        const exceededTime = elapsedSec > maxDurationSec + 15;
+        const exceededViolation =
+          isAntiCheatExam &&
+          Number(exam.max_tab_switches) >= 1 &&
+          Number(existingAttempt[0].tab_switch_count) > Number(exam.max_tab_switches);
+
+        if (exceededTime || exceededViolation) {
+          const [examQRows] = await pool.query(
+            `SELECT q.id, q.correct_answer
+             FROM exam_questions eq
+             INNER JOIN questions q ON eq.question_id = q.id
+             WHERE eq.exam_id = ?`,
             [id]
           );
+          const validIds = new Set(examQRows.map((q) => String(q.id)));
+          const savedAnswers = parseSafeDraftAnswers(
+            existingAttempt[0].draft_answers_json,
+            validIds
+          );
+          let correctCount = 0;
+          for (const q of examQRows) {
+            const choice = savedAnswers[String(q.id)];
+            if (choice && choice === q.correct_answer) {
+              correctCount++;
+            }
+          }
+          const totalQ = examQRows.length;
+          const autoScore =
+            totalQ > 0 ? Number(((correctCount / totalQ) * 10).toFixed(2)) : 0;
+          const recordedTabSwitches = isAntiCheatExam
+            ? Math.max(0, Number(existingAttempt[0].tab_switch_count) || 0)
+            : 0;
+          const recordedUnfocused = Math.min(
+            maxDurationSec,
+            Math.max(0, Number(existingAttempt[0].unfocused_seconds) || 0)
+          );
+          const recordedTimeSpent = Math.min(maxDurationSec, elapsedSec || maxDurationSec);
+
           await pool.query(
             `INSERT INTO submissions
-              (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, answers_json)
-             VALUES (?, ?, 0, 0, ?, ?, ?, 0, '{}')`,
+              (exam_id, student_id, score, correct_count, total_questions, time_spent_seconds, started_at, tab_switch_count, unfocused_seconds, answers_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               Number(id),
               req.user.id,
-              Number(qCntRows[0]?.cnt) || 0,
-              maxDurationSec,
-              new Date(prevStartedMs),
+              autoScore,
+              correctCount,
+              totalQ,
+              recordedTimeSpent,
+              existingAttempt[0].started_at,
+              recordedTabSwitches,
+              recordedUnfocused,
+              JSON.stringify(savedAnswers),
             ]
           );
           await pool.query(
@@ -322,30 +389,52 @@ export async function getExamById(req, res, next) {
     }
 
     let currentTabSwitchCount = 0;
+    let currentUnfocusedSeconds = 0;
+    let draftAnswers = {};
     let activeStartedAt = null;
     const baseDurationSec = (Number(exam.duration_minutes) || 30) * 60;
     let effectiveDurationSeconds = baseDurationSec;
+    let remainingSeconds = baseDurationSec;
     if (req.user?.role === "STUDENT") {
-      const nowDate = new Date();
       await pool.query(
-        `INSERT INTO exam_attempts (exam_id, user_id, started_at, status, tab_switch_count, last_violation_at, last_violation_reason)
-         VALUES (?, ?, ?, 'IN_PROGRESS', 0, NULL, NULL)
+        `INSERT INTO exam_attempts
+          (exam_id, user_id, started_at, status, tab_switch_count, unfocused_seconds, draft_answers_json, last_violation_at, last_violation_reason)
+         VALUES (?, ?, NOW(), 'IN_PROGRESS', 0, 0, NULL, NULL, NULL)
          ON DUPLICATE KEY UPDATE
-           started_at = IF(status = 'IN_PROGRESS', started_at, VALUES(started_at)),
+           started_at = IF(status = 'IN_PROGRESS', started_at, NOW()),
            tab_switch_count = IF(status = 'IN_PROGRESS', tab_switch_count, 0),
+           unfocused_seconds = IF(status = 'IN_PROGRESS', unfocused_seconds, 0),
+           draft_answers_json = IF(status = 'IN_PROGRESS', draft_answers_json, NULL),
            last_violation_at = IF(status = 'IN_PROGRESS', last_violation_at, NULL),
            last_violation_reason = IF(status = 'IN_PROGRESS', last_violation_reason, NULL),
            status = 'IN_PROGRESS'`,
-        [id, req.user.id, nowDate]
+        [id, req.user.id]
       );
 
       const [activeAttempt] = await pool.query(
-        "SELECT started_at, tab_switch_count FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
+        `SELECT
+           started_at,
+           TIMESTAMPDIFF(SECOND, started_at, NOW()) AS elapsed_seconds,
+           tab_switch_count,
+           unfocused_seconds,
+           draft_answers_json
+         FROM exam_attempts
+         WHERE exam_id = ? AND user_id = ?
+         LIMIT 1`,
         [id, req.user.id]
       );
       currentTabSwitchCount = isAntiCheatExam
         ? Math.max(0, Number(activeAttempt[0]?.tab_switch_count) || 0)
         : 0;
+      currentUnfocusedSeconds = Math.max(
+        0,
+        Number(activeAttempt[0]?.unfocused_seconds) || 0
+      );
+      const validIds = new Set(questionRows.map((q) => String(q.id)));
+      draftAnswers = parseSafeDraftAnswers(
+        activeAttempt[0]?.draft_answers_json,
+        validIds
+      );
       if (activeAttempt[0]?.started_at) {
         activeStartedAt = new Date(activeAttempt[0].started_at).toISOString();
       }
@@ -357,6 +446,8 @@ export async function getExamById(req, res, next) {
           effectiveDurationSeconds = Math.min(baseDurationSec, remainingToCloseSec);
         }
       }
+      const elapsedSec = Math.max(0, Number(activeAttempt[0]?.elapsed_seconds) || 0);
+      remainingSeconds = Math.max(0, effectiveDurationSeconds - elapsedSec);
     }
 
     return res.status(200).json({
@@ -368,7 +459,10 @@ export async function getExamById(req, res, next) {
         my_attempt_count: myAttemptCount,
         started_at: activeStartedAt,
         effective_duration_seconds: effectiveDurationSeconds,
+        remaining_seconds: remainingSeconds,
         current_tab_switch_count: currentTabSwitchCount,
+        current_unfocused_seconds: currentUnfocusedSeconds,
+        draft_answers: draftAnswers,
         questions: formattedQuestions,
       },
     });
@@ -781,11 +875,11 @@ export async function getAdminExamOverview(req, res, next) {
         (SELECT COUNT(*) FROM exam_questions eq WHERE eq.exam_id = e.id) AS question_count,
         (SELECT GROUP_CONCAT(eq.question_id ORDER BY eq.order_index ASC) FROM exam_questions eq WHERE eq.exam_id = e.id) AS question_ids_csv,
         (SELECT COUNT(*) FROM submissions sub WHERE sub.exam_id = e.id) AS completed_count,
-        (SELECT COUNT(*) FROM exam_attempts ea WHERE ea.exam_id = e.id AND ea.status = 'IN_PROGRESS' AND ea.started_at >= DATE_SUB(?, INTERVAL (e.duration_minutes + 5) MINUTE)) AS in_progress_count
+        (SELECT COUNT(*) FROM exam_attempts ea WHERE ea.exam_id = e.id AND ea.status = 'IN_PROGRESS' AND ea.started_at >= DATE_SUB(NOW(), INTERVAL (e.duration_minutes + 5) MINUTE)) AS in_progress_count
       FROM exams e
       INNER JOIN subjects s ON e.subject_id = s.id
       ORDER BY e.id DESC
-    `, [now]);
+    `);
 
     const alwaysOpen = [];
     const inProgressWindow = [];
@@ -858,6 +952,7 @@ export async function getExamLeaderboard(req, res, next) {
          sub.started_at,
          sub.submitted_at,
          sub.tab_switch_count,
+         sub.unfocused_seconds,
          sub.is_suspended,
          sub.suspend_reason,
          u.full_name,
@@ -909,6 +1004,8 @@ export async function getExamLeaderboard(req, res, next) {
          ea.id,
          ea.user_id,
          ea.started_at,
+         ea.tab_switch_count,
+         ea.unfocused_seconds,
          u.full_name,
          u.student_code,
          u.major_group
@@ -916,9 +1013,9 @@ export async function getExamLeaderboard(req, res, next) {
        INNER JOIN users u ON ea.user_id = u.id
        WHERE ea.exam_id = ?
          AND ea.status = 'IN_PROGRESS'
-         AND ea.started_at >= DATE_SUB(?, INTERVAL ? MINUTE)
+         AND ea.started_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
        ORDER BY ea.started_at ASC`,
-      [id, new Date(), (Number(exam.duration_minutes) || 30) + 5]
+      [id, (Number(exam.duration_minutes) || 30) + 5]
     );
 
     const completedCount = leaderboard.length;

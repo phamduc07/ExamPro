@@ -121,6 +121,7 @@ export default function AdminExamMonitor() {
       "Giờ bắt đầu",
       "Giờ nộp bài",
       "Số lần thoát tab",
+      "Tổng TG mất focus (giây)",
     ];
     const rows = leaderboardData.leaderboard.map((row) => [
       row.rank,
@@ -135,6 +136,7 @@ export default function AdminExamMonitor() {
       row.started_at ? new Date(row.started_at).toLocaleString("vi-VN") : "",
       row.submitted_at ? new Date(row.submitted_at).toLocaleString("vi-VN") : "",
       Number(row.tab_switch_count) || 0,
+      Number(row.unfocused_seconds) || 0,
     ]);
     const csvContent =
       "\uFEFF" +
@@ -684,6 +686,7 @@ export default function AdminExamMonitor() {
                                   <th>Thời gian làm</th>
                                   <th>Khung giờ nộp</th>
                                   <th>Thoát tab</th>
+                                  <th>Mất focus</th>
                                   <th style={{ textAlign: "right" }}>Thao tác</th>
                                 </tr>
                               </thead>
@@ -692,10 +695,20 @@ export default function AdminExamMonitor() {
                                   const score = Number(row.score);
                                   const isSuspended = Number(row.is_suspended) === 1;
                                   const tabCount = Number(row.tab_switch_count) || 0;
+                                  const unfocusedSec = Math.max(
+                                    0,
+                                    Number(row.unfocused_seconds) || 0
+                                  );
                                   const tabClass =
                                     tabCount === 0
                                       ? "safe"
                                       : tabCount <= 2
+                                      ? "warn"
+                                      : "danger";
+                                  const unfocusClass =
+                                    unfocusedSec === 0
+                                      ? "safe"
+                                      : unfocusedSec <= 15
                                       ? "warn"
                                       : "danger";
                                   return (
@@ -776,6 +789,11 @@ export default function AdminExamMonitor() {
                                           {tabCount} lần
                                         </span>
                                       </td>
+                                      <td>
+                                        <span className={`tab-switch-badge ${unfocusClass}`}>
+                                          {unfocusedSec}s
+                                        </span>
+                                      </td>
                                       <td style={{ textAlign: "right" }}>
                                         <div style={{ display: "inline-flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" }}>
                                           <button
@@ -833,6 +851,7 @@ export default function AdminExamMonitor() {
                                 <th>Họ tên</th>
                                 <th>Khối ngành</th>
                                 <th>Giờ bắt đầu vào thi</th>
+                                <th>Giám sát focus</th>
                                 <th>Trạng thái</th>
                                 <th style={{ textAlign: "right" }}>Thao tác</th>
                               </tr>
@@ -863,6 +882,12 @@ export default function AdminExamMonitor() {
                                   </td>
                                   <td>
                                     {new Date(item.started_at).toLocaleString("vi-VN")}
+                                  </td>
+                                  <td>
+                                    <span className="sub-text">
+                                      Vi phạm: <strong>{Number(item.tab_switch_count) || 0}</strong> • Mất focus:{" "}
+                                      <strong>{Number(item.unfocused_seconds) || 0}s</strong>
+                                    </span>
                                   </td>
                                   <td>
                                     <span className="tab-switch-badge warn">

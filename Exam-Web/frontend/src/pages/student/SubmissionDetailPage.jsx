@@ -61,8 +61,10 @@ export default function SubmissionDetailPage() {
   const isSuspended =
     Number(detail.is_suspended) === 1 || Boolean(detail.suspend_reason);
   const passed = !isSuspended && score >= Number(detail.pass_score ?? 5);
-  const hideDetails =
-    Boolean(detail.hideDetails) || Boolean(Number(detail.anti_cheat));
+  const canViewAnswers = Boolean(detail.can_view_answers) || isAdminViewer;
+  const hideDetails = !isAdminViewer && Boolean(detail.hideDetails);
+  const unfocusedSec = Math.max(0, Number(detail.unfocused_seconds) || 0);
+  const tabSwitches = Math.max(0, Number(detail.tab_switch_count) || 0);
   const accuracy =
     detail.total_questions > 0
       ? Math.round((detail.correct_count / detail.total_questions) * 100)
@@ -106,7 +108,14 @@ export default function SubmissionDetailPage() {
             Nộp lúc: {new Date(detail.submitted_at).toLocaleString("vi-VN")}
           </p>
 
-          <div className="result-kpi-grid">
+          <div
+            className="result-kpi-grid"
+            style={
+              isAdminViewer
+                ? { gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }
+                : undefined
+            }
+          >
             <div className="kpi-item">
               <span>Số câu trả lời đúng</span>
               <strong className="text-emerald">
@@ -124,16 +133,34 @@ export default function SubmissionDetailPage() {
                 {detail.time_spent_seconds % 60} giây
               </strong>
             </div>
+            {isAdminViewer && (
+              <>
+                <div className="kpi-item">
+                  <span>Số lần vi phạm rời tab</span>
+                  <strong>{tabSwitches} lần</strong>
+                </div>
+                <div className="kpi-item">
+                  <span>Tổng TG mất focus</span>
+                  <strong>{unfocusedSec} giây</strong>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </section>
 
       <section className="review-questions-section">
+        {!canViewAnswers && (
+          <div className="alert-box alert-warning" style={{ marginBottom: "18px" }}>
+            🔒 Đề thi hiện vẫn đang mở (chưa đóng đề hoặc chưa kết thúc đợt thi). Đáp án đúng và lời giải chi tiết được bảo mật cho đến khi đề thi chính thức đóng.
+          </div>
+        )}
+
         {hideDetails ? (
           <div className="panel-card" style={{ textAlign: "center", padding: "28px 24px" }}>
             <div style={{ fontSize: "1.8rem", marginBottom: "8px" }}>🛡️</div>
             <p style={{ margin: 0, color: "var(--text-main)", fontWeight: 600 }}>
-              Đề thi áp dụng chế độ chống gian lận (Anti-Cheat) nên hệ thống chỉ hiển thị điểm số và bảo mật toàn bộ nội dung câu hỏi, đáp án.
+              Đề thi áp dụng chế độ chống gian lận (Anti-Cheat) và đang trong thời gian mở thi nên hệ thống bảo mật toàn bộ nội dung câu hỏi và đáp án.
             </p>
           </div>
         ) : (
@@ -144,7 +171,7 @@ export default function SubmissionDetailPage() {
 
             <div className="review-list">
               {detail.questions?.map((q, idx) => {
-                const isCorrect = q.is_correct;
+                const isCorrect = canViewAnswers ? Boolean(q.is_correct) : null;
                 const baseOptions = [
                   { key: "A", text: q.option_a },
                   { key: "B", text: q.option_b },
@@ -165,54 +192,75 @@ export default function SubmissionDetailPage() {
                 const selectedDisplayLabel =
                   selectedIdx >= 0 ? displayLabels[selectedIdx] : q.selected_option;
 
+                const cardStateClass = !canViewAnswers
+                  ? ""
+                  : isCorrect
+                  ? "correct"
+                  : "wrong";
+
                 return (
                   <article
                     key={q.id}
-                    className={`review-question-card ${isCorrect ? "correct" : "wrong"}`}
+                    className={`review-question-card ${cardStateClass}`}
                   >
                     <div className="review-q-header">
                       <span className="review-q-num">Câu {idx + 1}</span>
-                      <span className={`review-status-pill ${isCorrect ? "ok" : "err"}`}>
-                        {isCorrect
-                          ? "✓ Trả lời chính xác"
-                          : q.selected_option
-                          ? `✕ Chọn sai (Bạn chọn ${selectedDisplayLabel})`
-                          : "✕ Chưa chọn đáp án"}
-                      </span>
+                      {canViewAnswers ? (
+                        <span className={`review-status-pill ${isCorrect ? "ok" : "err"}`}>
+                          {isCorrect
+                            ? "✓ Trả lời chính xác"
+                            : q.selected_option
+                            ? `✕ Chọn sai (Bạn chọn ${selectedDisplayLabel})`
+                            : "✕ Chưa chọn đáp án"}
+                        </span>
+                      ) : (
+                        <span className="code-badge">
+                          {q.selected_option
+                            ? `Đã chọn phương án ${selectedDisplayLabel}`
+                            : "Chưa chọn đáp án"}
+                        </span>
+                      )}
                     </div>
 
                     <p className="review-q-content">{q.content}</p>
 
                     <div className="review-options-grid">
                       {options.map((opt, optIdx) => {
-                        const isRightAns = q.correct_answer === opt.key;
+                        const isRightAns = canViewAnswers && q.correct_answer === opt.key;
                         const isUserSelected = q.selected_option === opt.key;
 
                         let cls = "review-option-item";
-                        if (isRightAns) {
+                        if (canViewAnswers) {
+                          if (isRightAns) {
+                            cls += " right-answer";
+                          } else if (isUserSelected && !isCorrect) {
+                            cls += " wrong-selected";
+                          }
+                        } else if (isUserSelected) {
                           cls += " right-answer";
-                        } else if (isUserSelected && !isCorrect) {
-                          cls += " wrong-selected";
                         }
 
                         return (
                           <div key={opt.key} className={cls}>
                             <span className="opt-badge">{displayLabels[optIdx] || opt.key}</span>
                             <span className="opt-label">{opt.text}</span>
-                            {isRightAns && (
+                            {canViewAnswers && isRightAns && (
                               <span className="opt-tag-right">
                                 ✓ {isUserSelected ? "Bạn chọn đúng" : "Đáp án đúng"}
                               </span>
                             )}
-                            {isUserSelected && !isCorrect && (
+                            {canViewAnswers && isUserSelected && !isCorrect && (
                               <span className="opt-tag-wrong">✕ Bạn đã chọn</span>
+                            )}
+                            {!canViewAnswers && isUserSelected && (
+                              <span className="opt-tag-right">Đã chọn</span>
                             )}
                           </div>
                         );
                       })}
                     </div>
 
-                    {q.explanation && (
+                    {canViewAnswers && q.explanation && (
                       <div className="explanation-banner">
                         <strong>💡 Giải thích chi tiết:</strong> {q.explanation}
                       </div>

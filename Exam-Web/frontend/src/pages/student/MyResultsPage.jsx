@@ -337,7 +337,7 @@ export default function MyResultsPage() {
                                       to={`/results/${item.id}`}
                                       className="btn-table-action"
                                     >
-                                      {Boolean(Number(item.anti_cheat)) ? "Xem kết quả →" : "Xem đáp án →"}
+                                      {item.can_view_answers ? "Xem đáp án →" : "Xem kết quả →"}
                                     </Link>
                                 </td>
                               </tr>
