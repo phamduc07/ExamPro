@@ -4,6 +4,7 @@ import {
   AUTH_COOKIE_NAME,
   extractCookieValue,
   authenticateRawToken,
+  isTrustedFrontendOrigin,
 } from "../middlewares/authMiddleware.js";
 import {
   getExamLiveProctoringData,
@@ -149,8 +150,7 @@ export function attachProctorSocketServer(httpServer, allowedOriginsSet) {
     cors: {
       origin: (origin, callback) => {
         if (!origin) return callback(null, true);
-        const normalized = origin.trim().replace(/\/+$/, "");
-        if (!allowedOriginsSet || allowedOriginsSet.has(normalized)) {
+        if (!allowedOriginsSet || isTrustedFrontendOrigin(origin, allowedOriginsSet)) {
           return callback(null, true);
         }
         return callback(new Error("Origin không được phép bởi chính sách CORS Socket.IO."));

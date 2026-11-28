@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect } from "react";
 import axiosClient from "../api/axiosClient";
+import { setSocketAuthToken } from "../api/socketClient";
 import { useExamStore } from "../store/useExamStore";
 
 const AuthContext = createContext(null);
@@ -16,9 +17,14 @@ export function AuthProvider({ children }) {
     axiosClient
       .get("/auth/me")
       .then((res) => {
-        setUser(res.data.data);
+        const meData = res.data.data;
+        if (meData?.socketToken) {
+          setSocketAuthToken(meData.socketToken);
+        }
+        setUser(meData);
       })
       .catch(() => {
+        setSocketAuthToken(null);
         setUser(null);
       })
       .finally(() => {
@@ -38,7 +44,8 @@ export function AuthProvider({ children }) {
         message: res.data.message,
       };
     }
-    const { user: loggedUser } = data;
+    const { user: loggedUser, token } = data;
+    setSocketAuthToken(token);
     setUser(loggedUser);
     return { requiresOtp: false, user: loggedUser };
   };
@@ -63,7 +70,8 @@ export function AuthProvider({ children }) {
         message: res.data.message,
       };
     }
-    const { user: loggedUser } = data;
+    const { user: loggedUser, token } = data;
+    setSocketAuthToken(token);
     setUser(loggedUser);
     return { requiresPasswordChange: false, user: loggedUser };
   };
@@ -72,6 +80,7 @@ export function AuthProvider({ children }) {
     const res = await axiosClient.post("/auth/login/check-approval", { approvalToken });
     const data = res.data.data || {};
     if (data.approved && data.user && !data.requiresPasswordChange) {
+      setSocketAuthToken(data.token);
       setUser(data.user);
     }
     return { ...data, message: res.data.message };
@@ -82,7 +91,8 @@ export function AuthProvider({ children }) {
       challengeToken,
       newPassword,
     });
-    const { user: loggedUser } = res.data.data;
+    const { user: loggedUser, token } = res.data.data;
+    setSocketAuthToken(token);
     setUser(loggedUser);
     return loggedUser;
   };
@@ -110,6 +120,7 @@ export function AuthProvider({ children }) {
       currentPassword,
       newPassword,
     });
+    setSocketAuthToken(null);
     return res.data;
   };
 
@@ -132,6 +143,7 @@ export function AuthProvider({ children }) {
       await axiosClient.post("/auth/logout");
     } catch {
     } finally {
+      setSocketAuthToken(null);
       try {
         localStorage.removeItem("ptit_exam_token");
       } catch {}

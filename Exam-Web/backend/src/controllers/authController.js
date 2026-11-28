@@ -851,11 +851,15 @@ export async function getMe(req, res, next) {
     }
 
     const u = rows[0];
+    const socketToken = req.user?.sessionId
+      ? signUserToken(u, req.user.sessionId)
+      : undefined;
     return res.status(200).json({
       success: true,
       data: {
         ...formatUserPayload(u),
         createdAt: u.created_at,
+        ...(socketToken ? { socketToken } : {}),
       },
     });
   } catch (error) {
@@ -1069,6 +1073,7 @@ export async function resetPassword(req, res, next) {
     if (userRows.length > 0) {
       invalidateTokenVersionCache(userRows[0].id);
     }
+    clearAuthCookie(res);
 
     return res.status(200).json({
       success: true,

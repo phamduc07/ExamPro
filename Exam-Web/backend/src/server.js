@@ -5,6 +5,11 @@ import dotenv from "dotenv";
 import { initializeDatabase } from "./config/db.js";
 import apiRoutes from "./routes/apiRoutes.js";
 import { notFoundHandler, errorHandler } from "./middlewares/errorMiddleware.js";
+import {
+  buildAllowedOriginsSet,
+  isTrustedFrontendOrigin,
+  createCsrfProtection,
+} from "./middlewares/csrfMiddleware.js";
 import { attachProctorSocketServer } from "./socket/proctorSocket.js";
 
 dotenv.config();
@@ -33,26 +38,18 @@ app.use((req, res, next) => {
   next();
 });
 
-const defaultOrigins = [
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "https://ptit-exampro.vercel.app",
-];
-const envOrigins = (process.env.FRONTEND_URL || "")
-  .split(",")
-  .map((url) => url.trim().replace(/\/+$/, ""))
-  .filter(Boolean);
-const allowedOrigins = new Set([...defaultOrigins, ...envOrigins]);
+const allowedOrigins = buildAllowedOriginsSet();
 
 app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
-      const normalized = origin.trim().replace(/\/+$/, "");
-      if (allowedOrigins.has(normalized)) {
+      if (isTrustedFrontendOrigin(origin, allowedOrigins)) {
         return callback(null, true);
       }
-      return callback(new Error("Origin không được phép bởi chính sách CORS."));
+      const corsError = new Error("Origin không được phép bởi chính sách CORS.");
+      corsError.statusCode = 403;
+      return callback(corsError);
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -60,6 +57,8 @@ app.use(
   })
 );
 app.use(express.json({ limit: "1mb" }));
+
+app.use("/api", createCsrfProtection(allowedOrigins));
 
 app.get("/api/health", (req, res) => {
   res.status(200).json({

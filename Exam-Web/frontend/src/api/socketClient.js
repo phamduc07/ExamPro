@@ -1,16 +1,33 @@
 import { io } from "socket.io-client";
-import axiosClient from "./axiosClient";
+
+const RENDER_BACKEND_ORIGIN = "https://ptit-exampro-backend.onrender.com";
+const LOCAL_BACKEND_ORIGIN = "http://localhost:5000";
+
+let socketAuthToken = null;
+
+export function setSocketAuthToken(token) {
+  socketAuthToken =
+    typeof token === "string" && token.trim() ? token.trim() : null;
+}
 
 export function resolveSocketUrl() {
-  const apiBase = String(
-    axiosClient.defaults.baseURL || "http://localhost:5000/api"
-  ).replace(/\/+$/, "");
-  return apiBase.endsWith("/api") ? apiBase.slice(0, -4) : apiBase;
+  const envUrl = import.meta.env.VITE_API_URL?.trim();
+  if (envUrl && /^https?:\/\//i.test(envUrl)) {
+    const cleaned = envUrl.replace(/\/+$/, "");
+    return cleaned.endsWith("/api") ? cleaned.slice(0, -4) : cleaned;
+  }
+  if (import.meta.env.PROD) {
+    return RENDER_BACKEND_ORIGIN;
+  }
+  return LOCAL_BACKEND_ORIGIN;
 }
 
 export function createRealtimeSocket() {
   const socket = io(resolveSocketUrl(), {
     withCredentials: true,
+    auth: (cb) => {
+      cb(socketAuthToken ? { token: socketAuthToken } : {});
+    },
     transports: ["websocket", "polling"],
     reconnection: true,
     reconnectionAttempts: Infinity,
@@ -19,6 +36,7 @@ export function createRealtimeSocket() {
   });
 
   const handleSessionReplaced = (payload) => {
+    setSocketAuthToken(null);
     try {
       sessionStorage.removeItem("ptit_exam_session");
       if (payload?.message) {

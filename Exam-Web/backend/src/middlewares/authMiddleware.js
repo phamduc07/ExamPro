@@ -1,16 +1,21 @@
 import jwt from "jsonwebtoken";
 import { pool } from "../config/db.js";
+export {
+  csrfProtection,
+  createCsrfProtection,
+  isTrustedFrontendOrigin,
+  buildAllowedOriginsSet,
+} from "./csrfMiddleware.js";
 
 export const AUTH_COOKIE_NAME = "ptit_access_token";
 const AUTH_CACHE_TTL_MS = 2000;
 const tokenVersionCache = new Map();
 
 export function getAuthCookieOptions() {
-  const isProd = process.env.NODE_ENV === "production";
   return {
     httpOnly: true,
-    sameSite: isProd ? "none" : "lax",
-    secure: isProd,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: 4 * 60 * 60 * 1000,
   };
@@ -21,11 +26,10 @@ export function setAuthCookie(res, token) {
 }
 
 export function clearAuthCookie(res) {
-  const isProd = process.env.NODE_ENV === "production";
   res.clearCookie(AUTH_COOKIE_NAME, {
     httpOnly: true,
-    sameSite: isProd ? "none" : "lax",
-    secure: isProd,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     path: "/",
   });
 }

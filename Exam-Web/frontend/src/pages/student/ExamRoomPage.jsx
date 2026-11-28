@@ -685,6 +685,7 @@ export default function ExamRoomPage() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
           },
           credentials: "include",
           keepalive: true,
