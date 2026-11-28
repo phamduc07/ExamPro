@@ -171,16 +171,30 @@ export async function syncExamProgress(req, res, next) {
 
     const maxDurationSec = (Number(exams[0].duration_minutes) || 30) * 60;
     let effectiveAllowedSec = maxDurationSec;
-    if (exams[0].close_at && attemptRows[0].started_at) {
-      const closeLimitSec = Math.max(
-        1,
-        Math.floor(
-          (new Date(exams[0].close_at).getTime() -
-            new Date(attemptRows[0].started_at).getTime()) /
-            1000
-        )
-      );
-      effectiveAllowedSec = Math.min(maxDurationSec, closeLimitSec);
+    if (exams[0].close_at) {
+      const closeAt = new Date(exams[0].close_at);
+      const closeAtMs = closeAt.getTime();
+      const attemptStarted = attemptRows[0].started_at
+        ? new Date(attemptRows[0].started_at)
+        : null;
+      if (!Number.isNaN(closeAtMs)) {
+        const hasValidStart =
+          attemptStarted !== null && !Number.isNaN(attemptStarted.getTime());
+        if (
+          !hasValidStart ||
+          attemptStarted > closeAt ||
+          Date.now() > closeAtMs + NETWORK_GRACE_SECONDS * 1000
+        ) {
+          return res.status(200).json({
+            success: true,
+            data: { synced: false, expired: true },
+          });
+        }
+        const closeLimitSec = Math.floor(
+          (closeAtMs - attemptStarted.getTime()) / 1000
+        );
+        effectiveAllowedSec = Math.min(maxDurationSec, closeLimitSec);
+      }
     }
 
     const elapsedSec = Math.max(0, Number(attemptRows[0].elapsed_seconds) || 0);
@@ -362,16 +376,18 @@ export async function submitExam(req, res, next) {
 
     if (!attemptRows.length || attemptRows[0].status !== "IN_PROGRESS") {
       await connection.rollback();
-      if (
-        !attemptRows.length &&
-        req.user.role === "STUDENT" &&
-        exam.close_at &&
-        Date.now() > new Date(exam.close_at).getTime() + NETWORK_GRACE_SECONDS * 1000
-      ) {
-        return res.status(403).json({
-          success: false,
-          message: "Đề thi đã hết thời gian đóng.",
-        });
+      if (exam.close_at) {
+        const closeAtMs = new Date(exam.close_at).getTime();
+        if (
+          !Number.isNaN(closeAtMs) &&
+          ((!attemptRows.length && Date.now() > closeAtMs) ||
+            Date.now() > closeAtMs + NETWORK_GRACE_SECONDS * 1000)
+        ) {
+          return res.status(403).json({
+            success: false,
+            message: "Đề thi đã đóng, không chấp nhận nộp bài.",
+          });
+        }
       }
       return res.status(409).json({
         success: false,
@@ -396,6 +412,34 @@ export async function submitExam(req, res, next) {
     }
 
     const activeAttempt = attemptRows[0];
+    const serverStarted = activeAttempt.started_at ? new Date(activeAttempt.started_at) : null;
+    const elapsedSeconds = Math.max(0, Number(activeAttempt.elapsed_seconds) || 0);
+
+    let effectiveAllowedSec = maxDurationSec;
+    if (exam.close_at) {
+      const closeAt = new Date(exam.close_at);
+      const closeAtMs = closeAt.getTime();
+      if (!Number.isNaN(closeAtMs)) {
+        const hasValidServerStart =
+          serverStarted !== null && !Number.isNaN(serverStarted.getTime());
+        if (
+          !hasValidServerStart ||
+          serverStarted > closeAt ||
+          Date.now() > closeAtMs + NETWORK_GRACE_SECONDS * 1000
+        ) {
+          await connection.rollback();
+          return res.status(403).json({
+            success: false,
+            message: "Đề thi đã đóng, không chấp nhận nộp bài.",
+          });
+        }
+        const closeLimitSec = Math.floor(
+          (closeAtMs - serverStarted.getTime()) / 1000
+        );
+        effectiveAllowedSec = Math.min(maxDurationSec, closeLimitSec);
+      }
+    }
+
     const activeBlueprint = parseAttemptBlueprint(activeAttempt.attempt_blueprint_json);
 
     let questions = [];
@@ -438,18 +482,6 @@ export async function submitExam(req, res, next) {
         success: false,
         message: "Có đáp án cho câu hỏi không thuộc đề thi.",
       });
-    }
-
-    const serverStarted = activeAttempt.started_at ? new Date(activeAttempt.started_at) : null;
-    const elapsedSeconds = Math.max(0, Number(activeAttempt.elapsed_seconds) || 0);
-
-    let effectiveAllowedSec = maxDurationSec;
-    if (exam.close_at && serverStarted && !Number.isNaN(serverStarted.getTime())) {
-      const closeLimitSec = Math.max(
-        1,
-        Math.floor((new Date(exam.close_at).getTime() - serverStarted.getTime()) / 1000)
-      );
-      effectiveAllowedSec = Math.min(maxDurationSec, closeLimitSec);
     }
 
     const serializedBlueprint = activeBlueprint ? JSON.stringify(activeBlueprint) : null;
@@ -1319,6 +1351,15 @@ export async function recordExamViolation(req, res, next) {
       return res.status(404).json({
         success: false,
         message: "Không tìm thấy đề thi.",
+      });
+    }
+
+    if (result.noActiveAttempt) {
+      return res.status(403).json({
+        success: false,
+        message:
+          result.message ||
+          "Không có lượt làm bài hợp lệ đang diễn ra cho đề thi này.",
       });
     }
 

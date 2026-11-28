@@ -247,10 +247,20 @@ export async function updateStudentFocusState({
 }) {
   if (!isId(examId) || !isId(userId)) return null;
   const [exams] = await pool.query(
-    "SELECT duration_minutes FROM exams WHERE id = ? LIMIT 1",
+    "SELECT duration_minutes, close_at FROM exams WHERE id = ? LIMIT 1",
     [Number(examId)]
   );
   if (!exams.length) return null;
+
+  if (exams[0].close_at) {
+    const closeAtMs = new Date(exams[0].close_at).getTime();
+    if (
+      !Number.isNaN(closeAtMs) &&
+      Date.now() > closeAtMs + NETWORK_GRACE_SECONDS * 1000
+    ) {
+      return getStudentLiveRow(pool, Number(examId), Number(userId));
+    }
+  }
 
   const maxDurationSec = (Number(exams[0].duration_minutes) || 30) * 60;
   const safeUnfocused =
@@ -262,7 +272,7 @@ export async function updateStudentFocusState({
     `UPDATE exam_attempts
      SET is_unfocused = ?,
          unfocused_seconds = GREATEST(unfocused_seconds, ?)
-     WHERE exam_id = ? AND user_id = ? AND status = 'IN_PROGRESS'`,
+     WHERE exam_id = ? AND user_id = ? AND status = 'IN_PROGRESS' AND is_suspended = 0`,
     [isFocused ? 0 : 1, safeUnfocused, Number(examId), Number(userId)]
   );
 
@@ -293,7 +303,7 @@ export async function recordViolationWithLog({
     await connection.beginTransaction();
 
     const [exams] = await connection.query(
-      `SELECT id, duration_minutes, max_tab_switches, anti_cheat
+      `SELECT id, duration_minutes, max_tab_switches, anti_cheat, close_at
        FROM exams
        WHERE id = ?`,
       [numericExamId]
@@ -304,22 +314,12 @@ export async function recordViolationWithLog({
     }
 
     const isAntiCheatEnabled = Boolean(Number(exams[0].anti_cheat));
-    if (!isAntiCheatEnabled) {
-      await connection.rollback();
-      return {
-        antiCheatEnabled: false,
-        isSuspended: false,
-        tabSwitchCount: 0,
-        maxTabSwitches: null,
-        forceSubmit: false,
-        violationLog: null,
-        studentRow: null,
-      };
-    }
-
     const rawMaxAllowed = Number(exams[0].max_tab_switches);
-    const maxAllowed =
-      Number.isInteger(rawMaxAllowed) && rawMaxAllowed >= 1 ? rawMaxAllowed : 3;
+    const maxAllowed = isAntiCheatEnabled
+      ? Number.isInteger(rawMaxAllowed) && rawMaxAllowed >= 1
+        ? rawMaxAllowed
+        : 3
+      : null;
 
     const [existingAttempt] = await connection.query(
       `SELECT
@@ -339,9 +339,9 @@ export async function recordViolationWithLog({
     );
 
     if (existingAttempt.length > 0 && Number(existingAttempt[0].is_suspended) === 1) {
-      await connection.commit();
+      await connection.rollback();
       return {
-        antiCheatEnabled: true,
+        antiCheatEnabled: isAntiCheatEnabled,
         isSuspended: true,
         suspendReason: existingAttempt[0].suspend_reason || "Vi phạm quy chế phòng thi",
         tabSwitchCount: Math.max(0, Number(existingAttempt[0].tab_switch_count) || 0),
@@ -352,19 +352,66 @@ export async function recordViolationWithLog({
       };
     }
 
-    if (existingAttempt.length > 0 && existingAttempt[0].status === "COMPLETED") {
-      const [lastSub] = await connection.query(
-        "SELECT id FROM submissions WHERE exam_id = ? AND student_id = ? ORDER BY id DESC LIMIT 1",
-        [numericExamId, numericUserId]
-      );
-      await connection.commit();
+    if (
+      !existingAttempt.length ||
+      existingAttempt[0].status !== "IN_PROGRESS" ||
+      !existingAttempt[0].started_at
+    ) {
+      await connection.rollback();
       return {
-        antiCheatEnabled: true,
+        noActiveAttempt: true,
+        rejected: true,
+        message: "Không có lượt làm bài hợp lệ đang diễn ra cho đề thi này.",
+        antiCheatEnabled: isAntiCheatEnabled,
         isSuspended: false,
-        tabSwitchCount: Math.max(0, Number(existingAttempt[0].tab_switch_count) || 0),
+        tabSwitchCount: 0,
         maxTabSwitches: maxAllowed,
-        forceSubmit: true,
-        submissionId: lastSub[0]?.id || null,
+        forceSubmit: false,
+        submissionId: null,
+        violationLog: null,
+        studentRow: null,
+      };
+    }
+
+    const activeAttempt = existingAttempt[0];
+    const attemptStartedAt = activeAttempt.started_at;
+    const serverStarted = new Date(attemptStartedAt);
+    const hasValidServerStart = !Number.isNaN(serverStarted.getTime());
+
+    if (exams[0].close_at) {
+      const closeAt = new Date(exams[0].close_at);
+      const closeAtMs = closeAt.getTime();
+      if (
+        !Number.isNaN(closeAtMs) &&
+        (!hasValidServerStart ||
+          serverStarted > closeAt ||
+          Date.now() > closeAtMs + NETWORK_GRACE_SECONDS * 1000)
+      ) {
+        await connection.rollback();
+        return {
+          noActiveAttempt: true,
+          rejected: true,
+          message: "Đề thi đã đóng, không chấp nhận ghi nhận vi phạm.",
+          antiCheatEnabled: isAntiCheatEnabled,
+          isSuspended: false,
+          tabSwitchCount: Math.max(0, Number(activeAttempt.tab_switch_count) || 0),
+          maxTabSwitches: maxAllowed,
+          forceSubmit: false,
+          submissionId: null,
+          violationLog: null,
+          studentRow: null,
+        };
+      }
+    }
+
+    if (!isAntiCheatEnabled) {
+      await connection.rollback();
+      return {
+        antiCheatEnabled: false,
+        isSuspended: false,
+        tabSwitchCount: 0,
+        maxTabSwitches: null,
+        forceSubmit: false,
         violationLog: null,
         studentRow: null,
       };
@@ -378,9 +425,9 @@ export async function recordViolationWithLog({
       if (dupRows.length > 0) {
         const currentTabCount = Math.max(
           0,
-          Number(existingAttempt[0]?.tab_switch_count) || 0
+          Number(activeAttempt.tab_switch_count) || 0
         );
-        await connection.commit();
+        await connection.rollback();
         return {
           antiCheatEnabled: true,
           deduplicated: true,
@@ -396,21 +443,32 @@ export async function recordViolationWithLog({
     }
 
     const maxDurationSec = (Number(exams[0].duration_minutes) || 30) * 60;
+    let effectiveAllowedSec = maxDurationSec;
+    if (exams[0].close_at && hasValidServerStart) {
+      const closeAtMs = new Date(exams[0].close_at).getTime();
+      if (!Number.isNaN(closeAtMs)) {
+        const closeLimitSec = Math.floor(
+          (closeAtMs - serverStarted.getTime()) / 1000
+        );
+        effectiveAllowedSec = Math.min(maxDurationSec, closeLimitSec);
+      }
+    }
+
     const safeUnfocused =
       isNumber(unfocusedSeconds) && Number(unfocusedSeconds) >= 0
         ? Math.min(maxDurationSec, Math.floor(Number(unfocusedSeconds)))
         : 0;
 
-    let mergedDraftJson = existingAttempt[0]?.draft_answers_json ?? null;
-    const elapsedSec = Math.max(0, Number(existingAttempt[0]?.elapsed_seconds) || 0);
+    let mergedDraftJson = activeAttempt.draft_answers_json ?? null;
+    const elapsedSec = Math.max(0, Number(activeAttempt.elapsed_seconds) || 0);
     if (
       answers &&
       typeof answers === "object" &&
       !Array.isArray(answers) &&
-      elapsedSec <= maxDurationSec + NETWORK_GRACE_SECONDS
+      elapsedSec <= effectiveAllowedSec + NETWORK_GRACE_SECONDS
     ) {
       const existingBp = parseAttemptBlueprint(
-        existingAttempt[0]?.attempt_blueprint_json
+        activeAttempt.attempt_blueprint_json
       );
       let validIds;
       if (existingBp) {
@@ -430,23 +488,9 @@ export async function recordViolationWithLog({
       mergedDraftJson = JSON.stringify(mergedDraftJson);
     }
 
-    if (!existingAttempt.length) {
-      await connection.query(
-        `INSERT INTO exam_attempts
-          (exam_id, user_id, started_at, status, tab_switch_count, unfocused_seconds, is_unfocused, draft_answers_json, last_violation_at, last_violation_reason)
-         VALUES (?, ?, NOW(), 'IN_PROGRESS', 0, ?, 1, ?, NOW(), ?)`,
-        [numericExamId, numericUserId, safeUnfocused, mergedDraftJson, cleanReason]
-      );
-    }
-
-    const [attemptAnchor] = await connection.query(
-      "SELECT started_at, unfocused_seconds FROM exam_attempts WHERE exam_id = ? AND user_id = ? LIMIT 1",
-      [numericExamId, numericUserId]
-    );
-    const attemptStartedAt = attemptAnchor[0]?.started_at || null;
     const effectiveUnfocused = Math.max(
       safeUnfocused,
-      Number(attemptAnchor[0]?.unfocused_seconds) || 0
+      Number(activeAttempt.unfocused_seconds) || 0
     );
 
     const [logInsert] = await connection.query(
@@ -480,7 +524,7 @@ export async function recordViolationWithLog({
            draft_answers_json = COALESCE(?, draft_answers_json),
            last_violation_at = NOW(),
            last_violation_reason = ?
-       WHERE exam_id = ? AND user_id = ?`,
+       WHERE exam_id = ? AND user_id = ? AND status = 'IN_PROGRESS'`,
       [
         tabSwitchCount,
         safeUnfocused,

@@ -345,27 +345,37 @@ export function attachProctorSocketServer(httpServer, allowedOriginsSet) {
           clientEventId: payload?.clientEventId ?? null,
         });
 
-        if (!result.notFound && result.violationLog) {
+        if (!result.notFound && !result.noActiveAttempt && result.violationLog) {
           emitProctorViolationNew(examId, result.violationLog, result.studentRow);
         } else if (result.studentRow) {
           await emitProctorStudentState(examId, user.id, result.studentRow);
         }
 
         if (typeof ack === "function") {
-          ack({
-            success: !result.notFound,
-            data: result.notFound
-              ? null
-              : {
-                  antiCheatEnabled: result.antiCheatEnabled,
-                  isSuspended: result.isSuspended,
-                  suspendReason: result.suspendReason || null,
-                  tabSwitchCount: result.tabSwitchCount,
-                  maxTabSwitches: result.maxTabSwitches,
-                  forceSubmit: result.forceSubmit,
-                  submissionId: result.submissionId || null,
-                },
-          });
+          if (result.notFound || result.noActiveAttempt) {
+            ack({
+              success: false,
+              message:
+                result.message ||
+                (result.notFound
+                  ? "Không tìm thấy đề thi."
+                  : "Không có lượt làm bài hợp lệ đang diễn ra cho đề thi này."),
+              data: null,
+            });
+          } else {
+            ack({
+              success: true,
+              data: {
+                antiCheatEnabled: result.antiCheatEnabled,
+                isSuspended: result.isSuspended,
+                suspendReason: result.suspendReason || null,
+                tabSwitchCount: result.tabSwitchCount,
+                maxTabSwitches: result.maxTabSwitches,
+                forceSubmit: result.forceSubmit,
+                submissionId: result.submissionId || null,
+              },
+            });
+          }
         }
       } catch (err) {
         if (typeof ack === "function") {

@@ -846,3 +846,120 @@ test("Đối chiếu thời gian thực tế (+15s trễ mạng), chốt điểm
   }
   assert.equal(hitRateLimit, true);
 });
+
+test("Chặn triệt để lỗ hổng tự tạo exam_attempts qua /violation và nộp bài sau close_at (403 Forbidden)", async () => {
+  const futureClose = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const createRes = await request("/exams", {
+    method: "POST",
+    token: teacherToken,
+    body: {
+      ...examForm(),
+      title: "Đề kiểm tra bảo mật close_at",
+      isPublished: 1,
+      antiCheat: 1,
+      maxTabSwitches: 3,
+      closeAt: futureClose,
+    },
+  });
+  assert.equal(createRes.status, 201);
+  const secExamId = createRes.body.data.id;
+
+  // 1. Sinh viên chưa bắt đầu thi gọi /violation -> bị từ chối 403, không tạo exam_attempts
+  const prematureVio = await request(`/exams/${secExamId}/violation`, {
+    method: "POST",
+    token: studentToken,
+    body: { reason: "Giả mạo vi phạm để tạo lượt thi", answers: { [questionId]: "A" }, unfocused_seconds: 5 },
+  });
+  assert.equal(prematureVio.status, 403);
+  const [attemptsAfterPremature] = await pool.query(
+    "SELECT id FROM exam_attempts WHERE exam_id = ? AND user_id = (SELECT id FROM users WHERE email = 'student@ptit.edu.vn')",
+    [secExamId]
+  );
+  assert.equal(attemptsAfterPremature.length, 0);
+
+  // 2. Luồng hợp lệ khi đề đang mở: bắt đầu thi -> ghi nhận vi phạm -> nộp bài thành công
+  const ducLogin = await request("/auth/login", {
+    method: "POST",
+    body: { email: "DucPA.B25CC302@stu.ptit.edu.vn", password: "TestPass123" },
+  });
+  const ducToken = ducLogin.body.data.token;
+
+  const validStart = await request(`/exams/${secExamId}?mode=take`, { token: ducToken });
+  assert.equal(validStart.status, 200);
+  const ducRightKey = findOptionKeyByText(validStart.body.data.questions[0], "A");
+
+  const validVio = await request(`/exams/${secExamId}/violation`, {
+    method: "POST",
+    token: ducToken,
+    body: { reason: "Rời tab hợp lệ khi đang thi", unfocused_seconds: 3 },
+  });
+  assert.equal(validVio.status, 200);
+  assert.equal(validVio.body.data.tabSwitchCount, 1);
+
+  const validSub = await request("/submissions", {
+    method: "POST",
+    token: ducToken,
+    body: { examId: secExamId, answers: { [questionId]: ducRightKey }, timeSpentSeconds: 5, tab_switch_count: 1, unfocused_seconds: 3 },
+  });
+  assert.equal(validSub.status, 201);
+  assert.equal(validSub.body.data.score, 10);
+
+  // Sau khi đã COMPLETED, gọi /violation tiếp cũng bị từ chối 403
+  const postCompleteVio = await request(`/exams/${secExamId}/violation`, {
+    method: "POST",
+    token: ducToken,
+    body: { reason: "Rời tab sau khi đã nộp", unfocused_seconds: 99 },
+  });
+  assert.equal(postCompleteVio.status, 403);
+
+  // 3. Sinh viên thứ 2 bắt đầu thi hợp lệ trước khi đóng, nhưng nộp bài sau khi đề đã đóng quá 15s ân hạn -> 403 Forbidden
+  const studentStart = await request(`/exams/${secExamId}?mode=take`, { token: studentToken });
+  assert.equal(studentStart.status, 200);
+  const stuRightKey = findOptionKeyByText(studentStart.body.data.questions[0], "A");
+
+  await request(`/exams/${secExamId}/progress`, {
+    method: "PUT",
+    token: studentToken,
+    body: { answers: { [questionId]: stuRightKey }, unfocused_seconds: 1 },
+  });
+
+  // Đưa close_at về quá khứ 30 giây trước (> 15s grace) và started_at về 120 giây trước
+  await pool.query(
+    "UPDATE exams SET close_at = DATE_SUB(NOW(), INTERVAL 30 SECOND) WHERE id = ?",
+    [secExamId]
+  );
+  await pool.query(
+    "UPDATE exam_attempts SET started_at = DATE_SUB(NOW(), INTERVAL 120 SECOND) WHERE exam_id = ? AND user_id = (SELECT id FROM users WHERE email = 'student@ptit.edu.vn')",
+    [secExamId]
+  );
+
+  const lateCloseSub = await request("/submissions", {
+    method: "POST",
+    token: studentToken,
+    body: { examId: secExamId, answers: { [questionId]: stuRightKey }, timeSpentSeconds: 60 },
+  });
+  assert.equal(lateCloseSub.status, 403);
+
+  const [stuSubsAfterClose] = await pool.query(
+    "SELECT id FROM submissions WHERE exam_id = ? AND student_id = (SELECT id FROM users WHERE email = 'student@ptit.edu.vn')",
+    [secExamId]
+  );
+  assert.equal(stuSubsAfterClose.length, 0);
+
+  // 4. Trường hợp started_at > close_at (kể cả khi close_at mới qua 2 giây, nằm trong 15s grace) -> vẫn bị từ chối 403
+  await pool.query(
+    "UPDATE exams SET close_at = DATE_SUB(NOW(), INTERVAL 5 SECOND) WHERE id = ?",
+    [secExamId]
+  );
+  await pool.query(
+    "UPDATE exam_attempts SET started_at = DATE_SUB(NOW(), INTERVAL 1 SECOND) WHERE exam_id = ? AND user_id = (SELECT id FROM users WHERE email = 'student@ptit.edu.vn')",
+    [secExamId]
+  );
+
+  const startedAfterCloseSub = await request("/submissions", {
+    method: "POST",
+    token: studentToken,
+    body: { examId: secExamId, answers: { [questionId]: stuRightKey }, timeSpentSeconds: 1 },
+  });
+  assert.equal(startedAfterCloseSub.status, 403);
+});
